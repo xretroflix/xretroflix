@@ -305,14 +305,21 @@ async def alert_owner_unauthorized_access(context: ContextTypes.DEFAULT_TYPE,
 async def owner_only_check(update: Update,
                            context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Check if user is the owner"""
-    if not update.effective_user or update.effective_user.id != ADMIN_ID:
-        await alert_owner_unauthorized_access(context, update.effective_user.id,
-                                              update.effective_user.username,
-                                              update.effective_user.first_name,
-                                              update.message.text if update.message else "callback")
-        await update.message.reply_text("❌ Unauthorized")
+    try:
+        if not update.effective_user or update.effective_user.id != ADMIN_ID:
+            if update.effective_user:
+                await alert_owner_unauthorized_access(context, update.effective_user.id,
+                                                      update.effective_user.username or "None",
+                                                      update.effective_user.first_name or "Unknown",
+                                                      update.message.text if update.message else "callback")
+            if update.message:
+                await update.message.reply_text("❌ Unauthorized")
+            return False
+        logger.info(f"✅ Owner check passed for user {update.effective_user.id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Owner check error: {e}")
         return False
-    return True
 
 
 # ========== SMART JOIN REQUEST HANDLER ==========
@@ -580,10 +587,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add a channel to manage"""
+    logger.info(f"📢 add_channel called by user {update.effective_user.id}")
+    
     if not await owner_only_check(update, context):
+        logger.warning(f"❌ Owner check failed for user {update.effective_user.id}")
         return
 
     if not context.args or len(context.args) < 2:
+        logger.info("❌ Invalid args - showing usage")
         await update.message.reply_text(
             "Usage: `/addchannel CHANNEL_ID CHANNEL_NAME`\n\n"
             "Example: `/addchannel -1001234567890 My Premium Channel`",
@@ -593,14 +604,22 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         channel_id = int(context.args[0])
         channel_name = ' '.join(context.args[1:])
+        
+        logger.info(f"📢 Attempting to add channel: {channel_name} ({channel_id})")
 
         # Check if bot is admin
-        if not await is_bot_admin(context, channel_id):
+        is_admin = await is_bot_admin(context, channel_id)
+        logger.info(f"🔍 Bot admin check for {channel_id}: {is_admin}")
+        
+        if not is_admin:
             await update.message.reply_text("❌ Bot is not admin in that channel")
             return
 
         MANAGED_CHANNELS[channel_id] = {'name': channel_name}
         save_data()
+        
+        logger.info(f"✅ Channel added successfully: {channel_name} ({channel_id})")
+        logger.info(f"📊 Total managed channels: {len(MANAGED_CHANNELS)}")
 
         await update.message.reply_text(
             f"✅ Channel added!\n\n"
@@ -609,21 +628,27 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Smart Verification: Enabled",
             parse_mode='Markdown')
 
-        logger.info(f"✅ Channel added: {channel_name} ({channel_id})")
-
-    except ValueError:
+    except ValueError as e:
+        logger.error(f"❌ ValueError in add_channel: {e}")
         await update.message.reply_text("❌ Invalid channel ID")
     except Exception as e:
+        logger.error(f"❌ Exception in add_channel: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
-        logger.error(f"Add channel failed: {e}")
+
 
 
 async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all managed channels"""
+    logger.info(f"📋 list_channels called by user {update.effective_user.id}")
+    
     if not await owner_only_check(update, context):
+        logger.warning(f"❌ Owner check failed for user {update.effective_user.id}")
         return
 
+    logger.info(f"📊 Current MANAGED_CHANNELS: {MANAGED_CHANNELS}")
+    
     if not MANAGED_CHANNELS:
+        logger.info("ℹ️ No channels in database")
         await update.message.reply_text("No channels added yet")
         return
 
@@ -634,6 +659,7 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"ID: `{channel_id}`\n"
         text += f"Mode: {bulk_status}\n\n"
 
+    logger.info(f"✅ Sending channel list with {len(MANAGED_CHANNELS)} channels")
     await update.message.reply_text(text, parse_mode='Markdown')
 
 
@@ -894,21 +920,41 @@ async def upload_images_command(update: Update,
     context.user_data['uploading_mode'] = True
     context.user_data['uploading_for_channel'] = None  # Clear channel-specific flag
     await update.message.reply_text(
-        "📤 Upload Mode Enabled\n\n"
-        "Send images (with or without captions).\n"
-        "Images with captions will use those captions when auto-posting.\n"
-        "Use /done_uploading when finished")
+        "📤 *Upload Mode: SILENT*\n\n"
+        "✅ Send images now (with or without captions)\n"
+        "📝 Images with captions will use those captions\n"
+        "🔇 No notifications per image (silent mode)\n"
+        "✅ Use /done_uploading to see summary\n\n"
+        "Ready for your images! 🚀",
+        parse_mode='Markdown')
 
 
 async def done_uploading(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop upload mode"""
+    """Stop upload mode with comprehensive summary"""
     if not await owner_only_check(update, context):
         return
 
     context.user_data['uploading_mode'] = False
-    await update.message.reply_text(
-        f"✅ Upload complete!\n\n"
-        f"Total images: {len(UPLOADED_IMAGES)}")
+    channel_id = context.user_data.get('uploading_for_channel')
+    
+    if channel_id:
+        # Channel-specific upload
+        count = len(CHANNEL_SPECIFIC_IMAGES.get(channel_id, []))
+        channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
+        await update.message.reply_text(
+            f"✅ *Upload Complete!*\n\n"
+            f"Channel: {channel_name}\n"
+            f"Images Added: {count}\n\n"
+            f"Ready for auto-posting! 🚀",
+            parse_mode='Markdown')
+        context.user_data['uploading_for_channel'] = None
+    else:
+        # Global upload
+        await update.message.reply_text(
+            f"✅ *Upload Complete!*\n\n"
+            f"Total Global Images: {len(UPLOADED_IMAGES)}\n\n"
+            f"Use /list_images to see all images",
+            parse_mode='Markdown')
 
 
 async def upload_for_channel_command(update: Update,
@@ -934,10 +980,13 @@ async def upload_for_channel_command(update: Update,
         context.user_data['uploading_mode'] = True
 
         await update.message.reply_text(
-            f"📤 Upload Mode for {MANAGED_CHANNELS[channel_id]['name']}\n\n"
-            f"Send images (with or without captions).\n"
-            f"These images will only be used for this channel.\n"
-            f"Use /done_uploading when finished")
+            f"📤 *Upload Mode: {MANAGED_CHANNELS[channel_id]['name']}*\n\n"
+            f"✅ Send images now (with or without captions)\n"
+            f"📝 These images are exclusive to this channel\n"
+            f"🔇 Silent mode - no notifications per image\n"
+            f"✅ Use /done_uploading to see summary\n\n"
+            f"Ready for your images! 🚀",
+            parse_mode='Markdown')
 
     except ValueError:
         await update.message.reply_text("❌ Invalid channel ID")
@@ -1520,7 +1569,7 @@ async def handle_verification_code(update: Update,
 
 
 async def handle_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle image uploads"""
+    """Handle image uploads - SILENT mode with batch summary"""
     if not update.effective_user or update.effective_user.id != ADMIN_ID:
         return
 
@@ -1542,15 +1591,18 @@ async def handle_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         if channel_id not in CHANNEL_SPECIFIC_IMAGES:
             CHANNEL_SPECIFIC_IMAGES[channel_id] = []
         CHANNEL_SPECIFIC_IMAGES[channel_id].append(image_data)
-        await update.message.reply_text(
-            f"✅ Image added to {MANAGED_CHANNELS[channel_id]['name']}\n"
-            f"Total: {len(CHANNEL_SPECIFIC_IMAGES[channel_id])}")
+        
+        # Silent - only log to console
+        logger.info(f"✅ Image added to channel {channel_id}. Total: {len(CHANNEL_SPECIFIC_IMAGES[channel_id])}")
     else:
         UPLOADED_IMAGES.append(image_data)
-        await update.message.reply_text(
-            f"✅ Image uploaded! Total: {len(UPLOADED_IMAGES)}")
+        
+        # Silent - only log to console
+        logger.info(f"✅ Global image uploaded. Total: {len(UPLOADED_IMAGES)}")
 
     save_data()
+    
+    # NO REPLY MESSAGE - completely silent!
 
 
 async def handle_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
