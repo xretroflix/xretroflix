@@ -1134,14 +1134,14 @@ async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Add scheduler job
         scheduler.add_job(
             auto_post_job,
-            trigger=CronTrigger(minute='*/30'),
+            trigger=CronTrigger(minute='*/20'),
             args=[context.bot, channel_id],
             id=f'autopost_{channel_id}',
             replace_existing=True)
 
         await update.message.reply_text(
             f"✅ Auto-post enabled for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
-            f"Interval: Every 30 minutes")
+            f"Interval: Every 20 minutes")
 
     except ValueError:
         await update.message.reply_text("❌ Invalid channel ID")
