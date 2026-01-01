@@ -916,12 +916,11 @@ async def setup_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if len(context.args) < 5:
         await update.message.reply_text(
-            "Usage: `/setup_channel CHANNEL_ID \"Name\" TYPE INTERVAL \"CAPTION\"`\n\n"
+            "Usage: /setup_channel CHANNEL_ID \"Name\" TYPE INTERVAL \"CAPTION\"\n\n"
             "Example:\n"
-            "`/setup_channel -1001234567890 \"Glamour\" images 30 \"💎 Premium Content\"`\n\n"
+            "/setup_channel -1001234567890 \"Glamour\" images 30 \"💎 Premium Content\"\n\n"
             "Types: images, videos, links, mixed\n"
-            "Interval: minutes (30, 45, 60, etc)",
-            parse_mode='Markdown')
+            "Interval: minutes (30, 45, 60, etc)")
         return
 
     try:
@@ -968,19 +967,176 @@ async def setup_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         CHANNEL_POST_COUNT[channel_id] = 0
         save_data()
 
+        # FIX: Removed parse_mode to avoid Markdown errors
         await update.message.reply_text(
-            f"✅ *Channel Configured!*\n\n"
+            f"✅ Channel Configured!\n\n"
             f"Name: {channel_name}\n"
-            f"ID: `{channel_id}`\n"
+            f"ID: {channel_id}\n"
             f"Type: {content_type}\n"
             f"Interval: {interval} min\n"
             f"Caption: {caption}\n\n"
-            f"Use `/enable_autopost {channel_id}` to start!",
-            parse_mode='Markdown')
+            f"Use /enable_autopost {channel_id} to start!")
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
         logger.error(f"Setup channel failed: {e}")
+
+
+async def change_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Change channel caption"""
+    if not await owner_only_check(update, context):
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /change_caption CHANNEL_ID \"New caption\"")
+        return
+
+    try:
+        channel_id = int(context.args[0])
+        
+        full_text = ' '.join(context.args[1:])
+        if '"' in full_text:
+            cap_start = full_text.index('"') + 1
+            cap_end = full_text.index('"', cap_start)
+            new_caption = full_text[cap_start:cap_end]
+        else:
+            new_caption = full_text
+
+        if channel_id not in CHANNEL_CONFIG:
+            await update.message.reply_text("❌ Channel not configured")
+            return
+
+        CHANNEL_CONFIG[channel_id]['caption'] = new_caption
+        save_data()
+
+        # FIX: Removed parse_mode
+        await update.message.reply_text(
+            f"✅ Caption updated!\n\n"
+            f"New: {new_caption}")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def change_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Change posting interval"""
+    if not await owner_only_check(update, context):
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /change_interval CHANNEL_ID MINUTES")
+        return
+
+    try:
+        channel_id = int(context.args[0])
+        interval = int(context.args[1])
+
+        if channel_id not in CHANNEL_CONFIG:
+            await update.message.reply_text("❌ Channel not configured")
+            return
+
+        CHANNEL_CONFIG[channel_id]['interval'] = interval
+        save_data()
+
+        if CHANNEL_CONFIG[channel_id].get('enabled'):
+            try:
+                scheduler.remove_job(f'autopost_{channel_id}')
+            except:
+                pass
+            
+            scheduler.add_job(
+                auto_post_job,
+                trigger=CronTrigger(minute=f'*/{interval}'),
+                args=[context.bot, channel_id],
+                id=f'autopost_{channel_id}',
+                replace_existing=True)
+
+        # FIX: Removed parse_mode
+        await update.message.reply_text(
+            f"✅ Interval updated to {interval} minutes!")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def change_content_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Change content type"""
+    if not await owner_only_check(update, context):
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /change_content_type CHANNEL_ID TYPE\n\n"
+            "Types: images, videos, links, mixed")
+        return
+
+    try:
+        channel_id = int(context.args[0])
+        content_type = context.args[1].lower()
+
+        if content_type not in ['images', 'videos', 'links', 'mixed']:
+            await update.message.reply_text("❌ Invalid type. Use: images, videos, links, or mixed")
+            return
+
+        if channel_id not in CHANNEL_CONFIG:
+            await update.message.reply_text("❌ Channel not configured")
+            return
+
+        CHANNEL_CONFIG[channel_id]['type'] = content_type
+        save_data()
+
+        # FIX: Removed parse_mode
+        await update.message.reply_text(
+            f"✅ Content type changed to: {content_type}")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def channel_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View channel info"""
+    if not await owner_only_check(update, context):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /channel_info CHANNEL_ID")
+        return
+
+    try:
+        channel_id = int(context.args[0])
+
+        if channel_id not in CHANNEL_CONFIG:
+            await update.message.reply_text("❌ Channel not configured")
+            return
+
+        config = CHANNEL_CONFIG[channel_id]
+        channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
+        paused = CHANNEL_PAUSE_STATUS.get(channel_id, False)
+        post_count = CHANNEL_POST_COUNT.get(channel_id, 0)
+
+        # FIX: Removed Markdown formatting and parse_mode
+        text = (
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📢 {channel_name}\n"
+            f"━━━━━━━━━━━━━━━━\n\n"
+            f"ID: {channel_id}\n"
+            f"Content: {config['type']}\n"
+            f"Interval: {config['interval']} min\n"
+            f"Caption: {config['caption']}\n"
+            f"Status: {'⏸️ Paused' if paused else '▶️ Active'}\n"
+            f"Auto-post: {'✅ Enabled' if config.get('enabled') else '❌ Disabled'}\n"
+            f"Polls: {'✅ Every ' + str(config['poll_frequency']) + 'th' if config.get('polls') else '❌ Disabled'}\n"
+            f"Total Posts: {post_count}\n"
+            f"━━━━━━━━━━━━━━━━"
+        )
+
+        await update.message.reply_text(text)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
 
 # Continue with remaining functions from previous code...
