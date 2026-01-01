@@ -317,7 +317,7 @@ async def alert_owner_unauthorized_access(context: ContextTypes.DEFAULT_TYPE,
             f"ID: `{user_id}`\n"
             f"Username: @{username or 'None'}\n"
             f"Command: `{command}`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
     except Exception as e:
         logger.error(f"Alert failed: {e}")
 
@@ -374,7 +374,7 @@ async def start_verification(context: ContextTypes.DEFAULT_TYPE, user_id: int, c
             f"Please answer 3 questions to join the channel.\n\n"
             f"**Question 1/3:**\n{first_q}\n\n"
             f"Reply with your answer:",
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
         
         # Notify admin
@@ -387,7 +387,7 @@ async def start_verification(context: ContextTypes.DEFAULT_TYPE, user_id: int, c
             f"Channel: {MANAGED_CHANNELS[chat_id]['name']}\n"
             f"Reason: {reason}\n\n"
             f"User is answering 3 questions...",
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
         
         logger.info(f"🔐 Started verification for user {user_id}")
@@ -400,7 +400,7 @@ async def start_verification(context: ContextTypes.DEFAULT_TYPE, user_id: int, c
             f"⚠️ Cannot send verification to user {user_id}\n"
             f"User may have blocked the bot or restricted DMs.\n"
             f"Approving automatically...",
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
         # Auto-approve if can't verify
         await request.approve()
@@ -453,7 +453,7 @@ async def handle_verification_answer(update: Update, context: ContextTypes.DEFAU
                         f"✅ *Verification Passed!*\n\n"
                         f"Score: {verification['correct_answers']}/3\n"
                         f"You can now join the channel!",
-                        parse_mode='Markdown'
+                        parse_mode='HTML'
                     )
                     
                     # Notify admin
@@ -464,7 +464,7 @@ async def handle_verification_answer(update: Update, context: ContextTypes.DEFAU
                         f"ID: `{user_id}`\n"
                         f"Score: {verification['correct_answers']}/3\n"
                         f"Status: Approved",
-                        parse_mode='Markdown'
+                        parse_mode='HTML'
                     )
                     
                     logger.info(f"✅ User {user_id} passed verification: {verification['correct_answers']}/3")
@@ -501,7 +501,7 @@ async def handle_verification_answer(update: Update, context: ContextTypes.DEFAU
                     f"Score: {verification['correct_answers']}/3\n"
                     f"You need at least 2/3 correct answers.\n\n"
                     f"You have been blocked from joining.",
-                    parse_mode='Markdown'
+                    parse_mode='HTML'
                 )
                 
                 # Notify admin
@@ -512,7 +512,7 @@ async def handle_verification_answer(update: Update, context: ContextTypes.DEFAU
                     f"ID: `{user_id}`\n"
                     f"Score: {verification['correct_answers']}/3\n"
                     f"Status: Blocked",
-                    parse_mode='Markdown'
+                    parse_mode='HTML'
                 )
                 
                 logger.info(f"❌ User {user_id} failed verification: {verification['correct_answers']}/3 - BLOCKED")
@@ -525,7 +525,7 @@ async def handle_verification_answer(update: Update, context: ContextTypes.DEFAU
                 f"✅ Correct!\n\n"
                 f"**Question {verification['current_question'] + 1}/3:**\n{next_q}\n\n"
                 f"Reply with your answer:",
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
     
     else:
@@ -545,13 +545,13 @@ async def handle_verification_answer(update: Update, context: ContextTypes.DEFAU
             await update.message.reply_text(
                 f"❌ *Too Many Wrong Attempts*\n\n"
                 f"You have been blocked.",
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             
             await context.bot.send_message(
                 ADMIN_ID,
                 f"❌ User {user_id} blocked - too many wrong attempts",
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             
             del PENDING_VERIFICATIONS[user_id]
@@ -559,7 +559,7 @@ async def handle_verification_answer(update: Update, context: ContextTypes.DEFAU
             await update.message.reply_text(
                 f"❌ Incorrect. Try again.\n\n"
                 f"**Question {current_q_index + 1}/3:**\n{current_question['question']}",
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
 
 
@@ -631,7 +631,7 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"User: {user.first_name}\n"
                 f"ID: `{user.id}`\n"
                 f"Reason: {legitimacy.get('reason')}",
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             return
             
@@ -657,7 +657,7 @@ async def set_image_storage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: `/set_image_storage CHANNEL_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -675,7 +675,7 @@ async def set_image_storage(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Image storage set!\n\n"
             f"Channel ID: `{channel_id}`\n"
             f"Upload images there, then use /reload_storage",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except ValueError:
         await update.message.reply_text("❌ Invalid channel ID")
@@ -691,7 +691,7 @@ async def set_video_storage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: `/set_video_storage CHANNEL_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -709,7 +709,7 @@ async def set_video_storage(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Video storage set!\n\n"
             f"Channel ID: `{channel_id}`\n"
             f"Upload videos/images there, then use /reload_storage",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except ValueError:
         await update.message.reply_text("❌ Invalid channel ID")
@@ -802,7 +802,7 @@ async def reload_storage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📸 Images: {images_count}\n"
         f"🎥 Videos/Mixed: {videos_count}\n"
         f"🔗 Links: {len(STORAGE_LINKS)}",
-        parse_mode='Markdown')
+        parse_mode='HTML')
 
 
 def parse_links_from_text(text: str) -> list:
@@ -898,7 +898,7 @@ async def handle_link_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Old: {old_count}\n"
             f"New: {len(STORAGE_LINKS)}\n\n"
             f"Ready for posting!",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
         if os.path.exists(file_path):
             os.remove(file_path)
@@ -1153,7 +1153,7 @@ async def change_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text(
             "Usage: `/change_caption CHANNEL_ID \"New caption\"`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1177,7 +1177,7 @@ async def change_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Caption updated!\n\n"
             f"New: {new_caption}",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1191,7 +1191,7 @@ async def change_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text(
             "Usage: `/change_interval CHANNEL_ID MINUTES`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1220,7 +1220,7 @@ async def change_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             f"✅ Interval updated to {interval} minutes!",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1235,7 +1235,7 @@ async def change_content_type(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             "Usage: `/change_content_type CHANNEL_ID TYPE`\n\n"
             "Types: images, videos, links, mixed",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1255,7 +1255,7 @@ async def change_content_type(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         await update.message.reply_text(
             f"✅ Content type changed to: {content_type}",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1270,7 +1270,7 @@ async def enable_channel_polls(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             "Usage: `/enable_polls CHANNEL_ID FREQUENCY`\n\n"
             "Example: `/enable_polls -1001234567890 5`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1288,7 +1288,7 @@ async def enable_channel_polls(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             f"✅ Polls enabled!\n\n"
             f"Every {frequency}th post will be a poll",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1302,7 +1302,7 @@ async def disable_channel_polls(update: Update, context: ContextTypes.DEFAULT_TY
     if not context.args:
         await update.message.reply_text(
             "Usage: `/disable_polls CHANNEL_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1315,7 +1315,7 @@ async def disable_channel_polls(update: Update, context: ContextTypes.DEFAULT_TY
         CHANNEL_CONFIG[channel_id]['polls'] = False
         save_data()
 
-        await update.message.reply_text("✅ Polls disabled!", parse_mode='Markdown')
+        await update.message.reply_text("✅ Polls disabled!", parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1329,7 +1329,7 @@ async def pause_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: `/pause CHANNEL_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1345,7 +1345,7 @@ async def pause_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
         await update.message.reply_text(
             f"⏸️ Paused: {channel_name}",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1359,7 +1359,7 @@ async def resume_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: `/resume CHANNEL_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1375,7 +1375,7 @@ async def resume_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
         await update.message.reply_text(
             f"▶️ Resumed: {channel_name}",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1389,7 +1389,7 @@ async def post_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: `/post_now CHANNEL_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1415,7 +1415,7 @@ async def skip_next_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: `/skip_next CHANNEL_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1440,7 +1440,7 @@ async def skip_next_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"⏭️ Next post skipped!\n\n"
             f"Will resume in {interval} minutes",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1454,7 +1454,7 @@ async def channel_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: `/channel_info CHANNEL_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1484,7 +1484,7 @@ async def channel_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"━━━━━━━━━━━━━━━━"
         )
 
-        await update.message.reply_text(text, parse_mode='Markdown')
+        await update.message.reply_text(text, parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1512,7 +1512,7 @@ async def all_channels_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   Posts: {CHANNEL_POST_COUNT.get(channel_id, 0)}\n\n"
         )
 
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text, parse_mode='HTML')
 
 
 # ========== AUTO-POSTING JOB ==========
@@ -1622,7 +1622,7 @@ async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: `/enable_autopost CHANNEL_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1652,7 +1652,7 @@ async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Interval: Every {interval} minutes\n"
             f"Content: {config['type']}\n\n"
             f"Bot will start posting! 🚀",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1666,7 +1666,7 @@ async def disable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: `/disable_autopost CHANNEL_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1687,7 +1687,7 @@ async def disable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
         await update.message.reply_text(
             f"✅ Auto-post disabled for {channel_name}",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1744,7 +1744,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = "Hello! This bot is for channel management."
 
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text, parse_mode='HTML')
 
 
 async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1755,7 +1755,7 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
             "Usage: `/addchannel CHANNEL_ID CHANNEL_NAME`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1773,7 +1773,7 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Channel added!\n\n"
             f"Name: {channel_name}\n"
             f"ID: `{channel_id}`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1793,7 +1793,7 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{data['name']}\n"
         text += f"ID: `{channel_id}`\n\n"
 
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text, parse_mode='HTML')
 
 
 async def pending_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1812,7 +1812,7 @@ async def pending_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"Channel: {channel_name}\n"
         text += f"Question: {data['current_question'] + 1}/3\n\n"
 
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text, parse_mode='HTML')
 
 
 async def block_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1823,7 +1823,7 @@ async def block_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: `/block_user USER_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1833,7 +1833,7 @@ async def block_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             f"✅ User blocked: `{user_id}`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except ValueError:
         await update.message.reply_text("❌ Invalid user ID")
@@ -1847,7 +1847,7 @@ async def unblock_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: `/unblock_user USER_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1856,7 +1856,7 @@ async def unblock_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in BLOCKED_USERS:
             BLOCKED_USERS.remove(user_id)
             save_data()
-            await update.message.reply_text(f"✅ User unblocked: `{user_id}`", parse_mode='Markdown')
+            await update.message.reply_text(f"✅ User unblocked: `{user_id}`", parse_mode='HTML')
         else:
             await update.message.reply_text("❌ User not in blocked list")
 
@@ -1872,7 +1872,7 @@ async def toggle_bulk_approval(update: Update, context: ContextTypes.DEFAULT_TYP
     if not context.args:
         await update.message.reply_text(
             "Usage: `/toggle_bulk CHANNEL_ID`",
-            parse_mode='Markdown')
+            parse_mode='HTML')
         return
 
     try:
@@ -1892,7 +1892,7 @@ async def toggle_bulk_approval(update: Update, context: ContextTypes.DEFAULT_TYP
             f"✅ Mode changed!\n\n"
             f"Channel: {MANAGED_CHANNELS[channel_id]['name']}\n"
             f"New Mode: {new_mode}",
-            parse_mode='Markdown')
+            parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1929,7 +1929,7 @@ async def view_recent_activity(update: Update, context: ContextTypes.DEFAULT_TYP
             text += f"• {activity['user_name']}\n"
             text += f"  Reason: {activity.get('reason', 'Failed verification')}\n\n"
 
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text, parse_mode='HTML')
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1958,7 +1958,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"   🚫 Total Blocked: {len(BLOCKED_USERS)}\n\n"
         f"Status: Online 24/7 ✅"
     )
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text, parse_mode='HTML')
 
 
 # Manual posting
@@ -1970,7 +1970,7 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['posting_mode'] = True
     await update.message.reply_text(
         "📤 *Posting Mode*\n\nSend content to post",
-        parse_mode='Markdown')
+        parse_mode='HTML')
 
 
 async def handle_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
