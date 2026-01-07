@@ -40,6 +40,10 @@ CURRENT_IMAGE_INDEX = {}
 AUTO_POST_ENABLED = {}
 POSTING_INTERVAL_HOURS = 1
 
+# NEW: Promo image storage
+PROMO_IMAGES = {}  # {channel_id: {'promo1': {...}, 'promo2': {...}}}
+POST_COUNTER = {}  # {channel_id: count} - tracks total posts for promo pattern
+
 USER_DATABASE = {}
 USER_ACTIVITY_LOG = []
 RECENT_ACTIVITY = []  # Store recent approvals/rejections for batch viewing
@@ -80,7 +84,9 @@ def save_data():
             'current_image_index': CURRENT_IMAGE_INDEX,
             'bulk_approval_mode': BULK_APPROVAL_MODE,
             'blocked_users': list(BLOCKED_USERS),
-            'user_database': USER_DATABASE
+            'user_database': USER_DATABASE,
+            'promo_images': PROMO_IMAGES,  # NEW
+            'post_counter': POST_COUNTER   # NEW
         }
         with open(STORAGE_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, default=str)
@@ -94,6 +100,7 @@ def load_data():
     global MANAGED_CHANNELS, UPLOADED_IMAGES, CHANNEL_SPECIFIC_IMAGES
     global DEFAULT_CAPTION, CHANNEL_DEFAULT_CAPTIONS, AUTO_POST_ENABLED
     global CURRENT_IMAGE_INDEX, BULK_APPROVAL_MODE, BLOCKED_USERS, USER_DATABASE
+    global PROMO_IMAGES, POST_COUNTER  # NEW
 
     try:
         if os.path.exists(STORAGE_FILE):
@@ -110,6 +117,8 @@ def load_data():
             BULK_APPROVAL_MODE = data.get('bulk_approval_mode', {})
             BLOCKED_USERS = set(data.get('blocked_users', []))
             USER_DATABASE = data.get('user_database', {})
+            PROMO_IMAGES = data.get('promo_images', {})  # NEW
+            POST_COUNTER = data.get('post_counter', {})   # NEW
 
             # Convert string keys to int
             MANAGED_CHANNELS = {
@@ -135,6 +144,14 @@ def load_data():
             CHANNEL_DEFAULT_CAPTIONS = {
                 int(k) if str(k).lstrip('-').isdigit() else k: v
                 for k, v in CHANNEL_DEFAULT_CAPTIONS.items()
+            }
+            PROMO_IMAGES = {
+                int(k) if str(k).lstrip('-').isdigit() else k: v
+                for k, v in PROMO_IMAGES.items()
+            }
+            POST_COUNTER = {
+                int(k) if str(k).lstrip('-').isdigit() else k: v
+                for k, v in POST_COUNTER.items()
             }
 
             logger.info(
@@ -565,6 +582,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/done_uploading - Finish\n"
             "/list_images - View list\n"
             "/clear_images - Delete all\n\n"
+
+            "━━━ PROMO IMAGES ━━━\n"
+            "/set_promo1 - Set promo 1\n"
+            "/set_promo2 - Set promo 2\n"
+            "/view_promos - View promos\n"
+            "/clear_promo1 - Clear promo 1\n"
+            "/clear_promo2 - Clear promo 2\n\n"
 
             "━━━ AUTO-POST ━━━\n"
             "/enable_autopost - Enable\n"
@@ -1110,6 +1134,151 @@ async def clear_channel_caption(update: Update,
         await update.message.reply_text("❌ Invalid channel ID")
 
 
+# ========== NEW PROMO IMAGE COMMANDS ==========
+async def set_promo1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set promo image 1 for channel (posts at 5th, 15th, 25th...)"""
+    if not await owner_only_check(update, context):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/set_promo1 CHANNEL_ID`\n\n"
+            "Then send the promo image (with optional caption)\n"
+            "This image will post at positions: 5, 15, 25, 35...",
+            parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+
+        if channel_id not in MANAGED_CHANNELS:
+            await update.message.reply_text("❌ Channel not managed")
+            return
+
+        context.user_data['setting_promo1'] = channel_id
+        await update.message.reply_text(
+            f"✅ Ready to set Promo 1 for {MANAGED_CHANNELS[channel_id]['name']}\n\n"
+            f"Send the promo image now (with optional caption)",
+            parse_mode='Markdown')
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID")
+
+
+async def set_promo2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set promo image 2 for channel (posts at 10th, 20th, 30th...)"""
+    if not await owner_only_check(update, context):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/set_promo2 CHANNEL_ID`\n\n"
+            "Then send the promo image (with optional caption)\n"
+            "This image will post at positions: 10, 20, 30, 40...",
+            parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+
+        if channel_id not in MANAGED_CHANNELS:
+            await update.message.reply_text("❌ Channel not managed")
+            return
+
+        context.user_data['setting_promo2'] = channel_id
+        await update.message.reply_text(
+            f"✅ Ready to set Promo 2 for {MANAGED_CHANNELS[channel_id]['name']}\n\n"
+            f"Send the promo image now (with optional caption)",
+            parse_mode='Markdown')
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID")
+
+
+async def view_promos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View all promo images"""
+    if not await owner_only_check(update, context):
+        return
+
+    if not PROMO_IMAGES:
+        await update.message.reply_text("No promo images set")
+        return
+
+    text = "🎯 *Promo Images Setup*\n\n"
+    
+    for channel_id, promos in PROMO_IMAGES.items():
+        channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
+        text += f"📢 {channel_name}\n"
+        
+        if 'promo1' in promos:
+            text += f"✅ Promo 1: Set (5th, 15th, 25th...)\n"
+        else:
+            text += f"❌ Promo 1: Not set\n"
+            
+        if 'promo2' in promos:
+            text += f"✅ Promo 2: Set (10th, 20th, 30th...)\n"
+        else:
+            text += f"❌ Promo 2: Not set\n"
+        
+        text += "\n"
+
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def clear_promo1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear promo image 1"""
+    if not await owner_only_check(update, context):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/clear_promo1 CHANNEL_ID`",
+            parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+
+        if channel_id in PROMO_IMAGES and 'promo1' in PROMO_IMAGES[channel_id]:
+            del PROMO_IMAGES[channel_id]['promo1']
+            if not PROMO_IMAGES[channel_id]:  # If empty dict, remove channel
+                del PROMO_IMAGES[channel_id]
+            save_data()
+            await update.message.reply_text("✅ Promo 1 cleared")
+        else:
+            await update.message.reply_text("❌ No promo 1 set for this channel")
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID")
+
+
+async def clear_promo2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear promo image 2"""
+    if not await owner_only_check(update, context):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/clear_promo2 CHANNEL_ID`",
+            parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+
+        if channel_id in PROMO_IMAGES and 'promo2' in PROMO_IMAGES[channel_id]:
+            del PROMO_IMAGES[channel_id]['promo2']
+            if not PROMO_IMAGES[channel_id]:  # If empty dict, remove channel
+                del PROMO_IMAGES[channel_id]
+            save_data()
+            await update.message.reply_text("✅ Promo 2 cleared")
+        else:
+            await update.message.reply_text("❌ No promo 2 set for this channel")
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID")
+
+
 async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Enable auto-posting for a channel"""
     if not await owner_only_check(update, context):
@@ -1129,19 +1298,31 @@ async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         AUTO_POST_ENABLED[channel_id] = True
+        
+        # Initialize post counter if not exists
+        if channel_id not in POST_COUNTER:
+            POST_COUNTER[channel_id] = 0
+        
         save_data()
 
-        # Add scheduler job
+        # Schedule first post with random delay (15-45 minutes)
+        first_delay = random.randint(15, 45)
         scheduler.add_job(
             auto_post_job,
-            trigger=CronTrigger(minute='*/20'),
+            'date',
+            run_date=datetime.now(),
             args=[context.bot, channel_id],
             id=f'autopost_{channel_id}',
             replace_existing=True)
 
         await update.message.reply_text(
             f"✅ Auto-post enabled for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
-            f"Interval: Every 20 minutes")
+            f"⏰ Random intervals: 15-45 minutes\n"
+            f"🎯 Promo pattern active\n"
+            f"🚀 Starting in {first_delay} minutes",
+            parse_mode='Markdown')
+
+        logger.info(f"✅ Auto-post enabled for {channel_id}")
 
     except ValueError:
         await update.message.reply_text("❌ Invalid channel ID")
@@ -1193,65 +1374,143 @@ async def autopost_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for channel_id, enabled in AUTO_POST_ENABLED.items():
         if enabled:
             channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
+            post_count = POST_COUNTER.get(channel_id, 0)
+            
+            # Check promo status
+            has_promo1 = channel_id in PROMO_IMAGES and 'promo1' in PROMO_IMAGES[channel_id]
+            has_promo2 = channel_id in PROMO_IMAGES and 'promo2' in PROMO_IMAGES[channel_id]
+            
             text += f"✅ {channel_name}\n"
+            text += f"   Posts: {post_count}\n"
+            text += f"   Promo 1: {'✅' if has_promo1 else '❌'}\n"
+            text += f"   Promo 2: {'✅' if has_promo2 else '❌'}\n\n"
 
     await update.message.reply_text(text, parse_mode='Markdown')
 
 
 async def auto_post_job(bot, channel_id: int):
-    """Auto-posting job - posts images every 30 minutes"""
+    """
+    NEW: Auto-posting job with:
+    1. Promo pattern (5th=promo1, 10th=promo2)
+    2. Random intervals (15-45 minutes)
+    """
     try:
         if not AUTO_POST_ENABLED.get(channel_id):
             return
 
-        # Get images for this channel
-        if channel_id in CHANNEL_SPECIFIC_IMAGES and CHANNEL_SPECIFIC_IMAGES[channel_id]:
-            images = CHANNEL_SPECIFIC_IMAGES[channel_id]
-        elif UPLOADED_IMAGES:
-            images = UPLOADED_IMAGES
-        else:
-            logger.warning(f"No images available for channel {channel_id}")
-            return
+        # Initialize post counter if needed
+        if channel_id not in POST_COUNTER:
+            POST_COUNTER[channel_id] = 0
 
-        # Initialize image index if needed
-        if channel_id not in CURRENT_IMAGE_INDEX:
-            CURRENT_IMAGE_INDEX[channel_id] = 0
+        # Increment counter BEFORE posting (so first post is #1, not #0)
+        POST_COUNTER[channel_id] += 1
+        current_position = POST_COUNTER[channel_id]
 
-        # Get current image
-        idx = CURRENT_IMAGE_INDEX[channel_id]
-        image = images[idx]
+        logger.info(f"🎯 Auto-post #{current_position} for channel {channel_id}")
 
-        # Determine caption (priority: image caption > channel caption > default caption)
-        if isinstance(image, dict) and image.get('caption'):
-            final_caption = image['caption']
+        # Check if this position matches promo pattern
+        position_mod = current_position % 10
+        
+        image_to_post = None
+        caption_to_use = ""
+        is_promo = False
+
+        # Promo Pattern Check
+        if position_mod == 5:  # 5th, 15th, 25th, 35th...
+            if channel_id in PROMO_IMAGES and 'promo1' in PROMO_IMAGES[channel_id]:
+                image_to_post = PROMO_IMAGES[channel_id]['promo1']
+                is_promo = True
+                logger.info(f"🎯 Using PROMO 1 at position {current_position}")
+        elif position_mod == 0:  # 10th, 20th, 30th, 40th...
+            if channel_id in PROMO_IMAGES and 'promo2' in PROMO_IMAGES[channel_id]:
+                image_to_post = PROMO_IMAGES[channel_id]['promo2']
+                is_promo = True
+                logger.info(f"🎯 Using PROMO 2 at position {current_position}")
+
+        # If not promo position or no promo set, use regular images
+        if not image_to_post:
+            # Get regular images for this channel
+            if channel_id in CHANNEL_SPECIFIC_IMAGES and CHANNEL_SPECIFIC_IMAGES[channel_id]:
+                images = CHANNEL_SPECIFIC_IMAGES[channel_id]
+            elif UPLOADED_IMAGES:
+                images = UPLOADED_IMAGES
+            else:
+                logger.warning(f"No images available for channel {channel_id}")
+                return
+
+            # Initialize image index if needed
+            if channel_id not in CURRENT_IMAGE_INDEX:
+                CURRENT_IMAGE_INDEX[channel_id] = 0
+
+            # Get current image
+            idx = CURRENT_IMAGE_INDEX[channel_id]
+            image_to_post = images[idx]
+
+            # Move to next image (loop back to start when done)
+            CURRENT_IMAGE_INDEX[channel_id] = (idx + 1) % len(images)
+
+        # Determine caption
+        if isinstance(image_to_post, dict) and image_to_post.get('caption'):
+            caption_to_use = image_to_post['caption']
         elif channel_id in CHANNEL_DEFAULT_CAPTIONS:
-            final_caption = CHANNEL_DEFAULT_CAPTIONS[channel_id]
+            caption_to_use = CHANNEL_DEFAULT_CAPTIONS[channel_id]
         elif DEFAULT_CAPTION:
-            final_caption = DEFAULT_CAPTION
+            caption_to_use = DEFAULT_CAPTION
         else:
-            final_caption = ""
+            caption_to_use = ""
 
         # Get file_id
-        if isinstance(image, dict):
-            file_id = image['file_id']
+        if isinstance(image_to_post, dict):
+            file_id = image_to_post['file_id']
         else:
-            file_id = image  # Old format compatibility
+            file_id = image_to_post  # Old format compatibility
 
         # Post to channel
         await bot.send_photo(
             chat_id=channel_id,
             photo=file_id,
-            caption=final_caption
+            caption=caption_to_use
         )
 
-        logger.info(f"✅ Auto-posted image #{idx+1} to channel {channel_id}")
+        promo_label = " (PROMO)" if is_promo else ""
+        logger.info(f"✅ Posted #{current_position}{promo_label} to channel {channel_id}")
 
-        # Move to next image (loop back to start when done)
-        CURRENT_IMAGE_INDEX[channel_id] = (idx + 1) % len(images)
         save_data()
+
+        # NEW: Schedule next post with RANDOM interval (15-45 minutes)
+        next_delay_minutes = random.randint(15, 45)
+        next_run_time = datetime.now()
+        
+        # Calculate next run time by adding random minutes
+        from datetime import timedelta
+        next_run_time = next_run_time + timedelta(minutes=next_delay_minutes)
+
+        scheduler.add_job(
+            auto_post_job,
+            'date',
+            run_date=next_run_time,
+            args=[bot, channel_id],
+            id=f'autopost_{channel_id}',
+            replace_existing=True)
+
+        logger.info(f"⏰ Next post in {next_delay_minutes} minutes (at {next_run_time.strftime('%H:%M')})")
 
     except Exception as e:
         logger.error(f"❌ Auto-post failed for channel {channel_id}: {e}")
+        
+        # On error, retry in 30 minutes (fallback)
+        try:
+            from datetime import timedelta
+            retry_time = datetime.now() + timedelta(minutes=30)
+            scheduler.add_job(
+                auto_post_job,
+                'date',
+                run_date=retry_time,
+                args=[bot, channel_id],
+                id=f'autopost_{channel_id}',
+                replace_existing=True)
+        except:
+            pass
 
 
 async def export_users_report(update: Update,
@@ -1526,6 +1785,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Count recent activity
     recent_approved = sum(1 for a in RECENT_ACTIVITY if a['type'] == 'auto_approved')
     recent_rejected = sum(1 for a in RECENT_ACTIVITY if a['type'] == 'auto_rejected')
+    
+    # Count promo images
+    promo_count = sum(1 for promos in PROMO_IMAGES.values() if promos)
 
     text = (f"📊 Statistics\n\n"
             f"📢 Channels: {len(MANAGED_CHANNELS)}\n"
@@ -1536,6 +1798,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ Recent Rejected: {recent_rejected}\n"
             f"🚫 Blocked: {len(BLOCKED_USERS)}\n"
             f"📂 Images: {len(UPLOADED_IMAGES)}\n"
+            f"🎯 Promo Channels: {promo_count}\n"
             f"🤖 Auto-Posts: {active_autoposts} active\n"
             f"👥 Total Users: {len(USER_DATABASE)}\n"
             f"🚨 Unauthorized: {len(UNAUTHORIZED_ATTEMPTS)}\n\n"
@@ -1580,6 +1843,48 @@ async def handle_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     file_id = photo.file_id
     caption = update.message.caption or ""
 
+    # Check if setting promo image
+    if context.user_data.get('setting_promo1'):
+        channel_id = context.user_data['setting_promo1']
+        
+        if channel_id not in PROMO_IMAGES:
+            PROMO_IMAGES[channel_id] = {}
+        
+        PROMO_IMAGES[channel_id]['promo1'] = {
+            'file_id': file_id,
+            'caption': caption
+        }
+        
+        save_data()
+        context.user_data['setting_promo1'] = None
+        
+        await update.message.reply_text(
+            f"✅ Promo 1 set for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
+            f"Will post at positions: 5, 15, 25, 35...",
+            parse_mode='Markdown')
+        return
+
+    if context.user_data.get('setting_promo2'):
+        channel_id = context.user_data['setting_promo2']
+        
+        if channel_id not in PROMO_IMAGES:
+            PROMO_IMAGES[channel_id] = {}
+        
+        PROMO_IMAGES[channel_id]['promo2'] = {
+            'file_id': file_id,
+            'caption': caption
+        }
+        
+        save_data()
+        context.user_data['setting_promo2'] = None
+        
+        await update.message.reply_text(
+            f"✅ Promo 2 set for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
+            f"Will post at positions: 10, 20, 30, 40...",
+            parse_mode='Markdown')
+        return
+
+    # Regular image upload
     # Store as dictionary with file_id and caption
     image_data = {
         'file_id': file_id,
@@ -1800,6 +2105,14 @@ def main():
     app.add_handler(CommandHandler("set_channel_caption", set_channel_caption))
     app.add_handler(
         CommandHandler("clear_channel_caption", clear_channel_caption))
+    
+    # NEW: Promo image commands
+    app.add_handler(CommandHandler("set_promo1", set_promo1_command))
+    app.add_handler(CommandHandler("set_promo2", set_promo2_command))
+    app.add_handler(CommandHandler("view_promos", view_promos_command))
+    app.add_handler(CommandHandler("clear_promo1", clear_promo1_command))
+    app.add_handler(CommandHandler("clear_promo2", clear_promo2_command))
+    
     app.add_handler(CommandHandler("enable_autopost", enable_autopost))
     app.add_handler(CommandHandler("disable_autopost", disable_autopost))
     app.add_handler(CommandHandler("autopost_status", autopost_status))
@@ -1851,8 +2164,10 @@ def main():
     for channel_id, enabled in AUTO_POST_ENABLED.items():
         if enabled:
             try:
+                # Start immediately (will then schedule next post randomly)
                 scheduler.add_job(auto_post_job,
-                                  trigger=CronTrigger(minute='*/30'),
+                                  'date',
+                                  run_date=datetime.now(),
                                   args=[app.bot, channel_id],
                                   id=f'autopost_{channel_id}',
                                   replace_existing=True)
@@ -1862,6 +2177,8 @@ def main():
 
     logger.info(f"✅ Bot running - Owner: {ADMIN_ID}")
     logger.info(f"✅ Smart Verification: ENABLED")
+    logger.info(f"✅ Random Intervals: 15-45 minutes")
+    logger.info(f"✅ Promo Pattern: 5th=Promo1, 10th=Promo2")
     logger.info(
         f"✅ Loaded: {len(MANAGED_CHANNELS)} channels, {len(UPLOADED_IMAGES)} images"
     )
