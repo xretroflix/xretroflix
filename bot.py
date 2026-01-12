@@ -44,6 +44,13 @@ POSTING_INTERVAL_HOURS = 1
 PROMO_IMAGES = {}  # {channel_id: {'promo1': {...}, 'promo2': {...}}}
 POST_COUNTER = {}  # {channel_id: count} - tracks total posts for promo pattern
 
+# NEW: Emoji rotation for pattern breaking
+CAPTION_EMOJIS = [
+    '🎬', '🔥', '⚡', '💎', '✨', '🎯', '🚀', '⭐', 
+    '🎭', '🎪', '🎨', '🎥', '🎞️', '📹', '📽️', '💥',
+    '💫', '🌟', '👑', '🏆', '🥇', '🎉', '🎊', '🍿'
+]
+
 USER_DATABASE = {}
 USER_ACTIVITY_LOG = []
 RECENT_ACTIVITY = []  # Store recent approvals/rejections for batch viewing
@@ -85,8 +92,8 @@ def save_data():
             'bulk_approval_mode': BULK_APPROVAL_MODE,
             'blocked_users': list(BLOCKED_USERS),
             'user_database': USER_DATABASE,
-            'promo_images': PROMO_IMAGES,  # NEW
-            'post_counter': POST_COUNTER   # NEW
+            'promo_images': PROMO_IMAGES,
+            'post_counter': POST_COUNTER
         }
         with open(STORAGE_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, default=str)
@@ -100,7 +107,7 @@ def load_data():
     global MANAGED_CHANNELS, UPLOADED_IMAGES, CHANNEL_SPECIFIC_IMAGES
     global DEFAULT_CAPTION, CHANNEL_DEFAULT_CAPTIONS, AUTO_POST_ENABLED
     global CURRENT_IMAGE_INDEX, BULK_APPROVAL_MODE, BLOCKED_USERS, USER_DATABASE
-    global PROMO_IMAGES, POST_COUNTER  # NEW
+    global PROMO_IMAGES, POST_COUNTER
 
     try:
         if os.path.exists(STORAGE_FILE):
@@ -117,8 +124,8 @@ def load_data():
             BULK_APPROVAL_MODE = data.get('bulk_approval_mode', {})
             BLOCKED_USERS = set(data.get('blocked_users', []))
             USER_DATABASE = data.get('user_database', {})
-            PROMO_IMAGES = data.get('promo_images', {})  # NEW
-            POST_COUNTER = data.get('post_counter', {})   # NEW
+            PROMO_IMAGES = data.get('promo_images', {})
+            POST_COUNTER = data.get('post_counter', {})
 
             # Convert string keys to int
             MANAGED_CHANNELS = {
@@ -549,7 +556,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👋 Welcome Owner!\n\n"
             "🤖 Bot Status: Online 24/7\n"
             f"📢 Channels: {len(MANAGED_CHANNELS)}\n"
-            f"⚙️ Smart Verification: Enabled\n\n"
+            f"⚙️ Smart Verification: Enabled\n"
+            f"🎯 Random Emojis: {len(CAPTION_EMOJIS)} emojis\n"
+            f"⏰ Random Intervals: 12-28 mins\n\n"
 
             "━━━ SETUP & INFO ━━━\n"
             "/start - This menu\n"
@@ -649,7 +658,8 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Channel added!\n\n"
             f"Name: {channel_name}\n"
             f"ID: `{channel_id}`\n"
-            f"Smart Verification: Enabled",
+            f"Smart Verification: Enabled\n"
+            f"Random Emojis: Active",
             parse_mode='Markdown')
 
     except ValueError as e:
@@ -917,7 +927,8 @@ async def verification_settings(update: Update,
         f"• Suspicious profiles\n\n"
         f"*Current Settings:*\n"
         f"Profile Photo Required: {REQUIRE_PROFILE_PHOTO}\n"
-        f"Min Account Age: {MIN_ACCOUNT_AGE_DAYS} days"
+        f"Min Account Age: {MIN_ACCOUNT_AGE_DAYS} days\n"
+        f"Random Emojis: {len(CAPTION_EMOJIS)} emojis"
     )
 
     await update.message.reply_text(text, parse_mode='Markdown')
@@ -1061,7 +1072,8 @@ async def set_default_caption(update: Update,
 
     await update.message.reply_text(
         f"✅ Default caption set!\n\n"
-        f"Caption: {DEFAULT_CAPTION}")
+        f"Caption: {DEFAULT_CAPTION}\n\n"
+        f"Note: Random emoji will be added automatically!")
 
 
 async def clear_default_caption(update: Update,
@@ -1102,7 +1114,8 @@ async def set_channel_caption(update: Update,
 
         await update.message.reply_text(
             f"✅ Caption set for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
-            f"Caption: {caption}")
+            f"Caption: {caption}\n\n"
+            f"Note: Random emoji will be added automatically!")
 
     except ValueError:
         await update.message.reply_text("❌ Invalid channel ID")
@@ -1305,8 +1318,8 @@ async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         save_data()
 
-        # Schedule first post with random delay (15-45 minutes)
-        first_delay = random.randint(15, 45)
+        # Schedule first post with random delay (12-28 minutes)
+        first_delay = random.randint(12, 28)
         scheduler.add_job(
             auto_post_job,
             'date',
@@ -1317,8 +1330,9 @@ async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             f"✅ Auto-post enabled for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
-            f"⏰ Random intervals: 15-45 minutes\n"
+            f"⏰ Random intervals: 12-28 minutes\n"
             f"🎯 Promo pattern active\n"
+            f"🎨 Random emoji active ({len(CAPTION_EMOJIS)} emojis)\n"
             f"🚀 Starting in {first_delay} minutes",
             parse_mode='Markdown')
 
@@ -1382,6 +1396,8 @@ async def autopost_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             text += f"✅ {channel_name}\n"
             text += f"   Posts: {post_count}\n"
+            text += f"   Interval: 12-28 mins (random)\n"
+            text += f"   Emoji: {len(CAPTION_EMOJIS)} rotating\n"
             text += f"   Promo 1: {'✅' if has_promo1 else '❌'}\n"
             text += f"   Promo 2: {'✅' if has_promo2 else '❌'}\n\n"
 
@@ -1390,9 +1406,10 @@ async def autopost_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def auto_post_job(bot, channel_id: int):
     """
-    NEW: Auto-posting job with:
-    1. Promo pattern (5th=promo1, 10th=promo2)
-    2. Random intervals (15-45 minutes)
+    Auto-posting job with:
+    1. Random emoji for each caption (pattern breaking)
+    2. Promo pattern (5th=promo1, 10th=promo2)
+    3. Random intervals (12-28 minutes)
     """
     try:
         if not AUTO_POST_ENABLED.get(channel_id):
@@ -1449,15 +1466,25 @@ async def auto_post_job(bot, channel_id: int):
             # Move to next image (loop back to start when done)
             CURRENT_IMAGE_INDEX[channel_id] = (idx + 1) % len(images)
 
-        # Determine caption
+        # NEW: Select random emoji for this post
+        random_emoji = random.choice(CAPTION_EMOJIS)
+
+        # Determine caption (priority: image caption > channel caption > default caption)
+        base_caption = ""
         if isinstance(image_to_post, dict) and image_to_post.get('caption'):
-            caption_to_use = image_to_post['caption']
+            base_caption = image_to_post['caption']
         elif channel_id in CHANNEL_DEFAULT_CAPTIONS:
-            caption_to_use = CHANNEL_DEFAULT_CAPTIONS[channel_id]
+            base_caption = CHANNEL_DEFAULT_CAPTIONS[channel_id]
         elif DEFAULT_CAPTION:
-            caption_to_use = DEFAULT_CAPTION
+            base_caption = DEFAULT_CAPTION
         else:
-            caption_to_use = ""
+            base_caption = ""
+
+        # Add random emoji at the beginning
+        if base_caption:
+            caption_to_use = f"{random_emoji} {base_caption}"
+        else:
+            caption_to_use = random_emoji
 
         # Get file_id
         if isinstance(image_to_post, dict):
@@ -1473,12 +1500,12 @@ async def auto_post_job(bot, channel_id: int):
         )
 
         promo_label = " (PROMO)" if is_promo else ""
-        logger.info(f"✅ Posted #{current_position}{promo_label} to channel {channel_id}")
+        logger.info(f"✅ Posted #{current_position}{promo_label} with emoji {random_emoji} to channel {channel_id}")
 
         save_data()
 
-        # NEW: Schedule next post with RANDOM interval (15-45 minutes)
-        next_delay_minutes = random.randint(15, 45)
+        # NEW: Schedule next post with RANDOM interval (12-28 minutes)
+        next_delay_minutes = random.randint(12, 28)
         next_run_time = datetime.now()
         
         # Calculate next run time by adding random minutes
@@ -1498,10 +1525,10 @@ async def auto_post_job(bot, channel_id: int):
     except Exception as e:
         logger.error(f"❌ Auto-post failed for channel {channel_id}: {e}")
         
-        # On error, retry in 30 minutes (fallback)
+        # On error, retry in 20 minutes (fallback)
         try:
             from datetime import timedelta
-            retry_time = datetime.now() + timedelta(minutes=30)
+            retry_time = datetime.now() + timedelta(minutes=20)
             scheduler.add_job(
                 auto_post_job,
                 'date',
@@ -1677,34 +1704,10 @@ async def clear_channel_media(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("Max 100 messages at a time")
             return
 
-        await update.message.reply_text(f"⏳ Deleting last {message_count} messages...")
-
-        deleted = 0
-        failed = 0
-
-        # Get recent messages and delete
-        try:
-            # This requires the bot to have delete messages permission
-            # We'll try to delete messages by ID
-            for i in range(message_count):
-                try:
-                    # Note: This is a simplified approach
-                    # In production, you'd need to track message IDs
-                    await update.message.reply_text(
-                        "⚠️ To delete messages, I need message IDs.\n"
-                        "This feature requires message tracking.\n"
-                        "Use /clear_images to clear bot's image storage instead.")
-                    return
-                except:
-                    failed += 1
-
-        except Exception as e:
-            await update.message.reply_text(f"Error: {str(e)}")
-            return
-
         await update.message.reply_text(
-            f"✅ Deleted: {deleted}\n"
-            f"❌ Failed: {failed}")
+            "⚠️ To delete messages, I need message IDs.\n"
+            "This feature requires message tracking.\n"
+            "Use /clear_images to clear bot's image storage instead.")
 
     except ValueError:
         await update.message.reply_text("Invalid channel ID or message count")
@@ -1799,6 +1802,8 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🚫 Blocked: {len(BLOCKED_USERS)}\n"
             f"📂 Images: {len(UPLOADED_IMAGES)}\n"
             f"🎯 Promo Channels: {promo_count}\n"
+            f"🎨 Emoji Pool: {len(CAPTION_EMOJIS)} emojis\n"
+            f"⏰ Posting: 12-28 mins (random)\n"
             f"🤖 Auto-Posts: {active_autoposts} active\n"
             f"👥 Total Users: {len(USER_DATABASE)}\n"
             f"🚨 Unauthorized: {len(UNAUTHORIZED_ATTEMPTS)}\n\n"
@@ -1860,7 +1865,8 @@ async def handle_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         await update.message.reply_text(
             f"✅ Promo 1 set for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
-            f"Will post at positions: 5, 15, 25, 35...",
+            f"Will post at positions: 5, 15, 25, 35...\n"
+            f"Emoji will be added automatically!",
             parse_mode='Markdown')
         return
 
@@ -1880,7 +1886,8 @@ async def handle_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         await update.message.reply_text(
             f"✅ Promo 2 set for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
-            f"Will post at positions: 10, 20, 30, 40...",
+            f"Will post at positions: 10, 20, 30, 40...\n"
+            f"Emoji will be added automatically!",
             parse_mode='Markdown')
         return
 
@@ -2073,6 +2080,8 @@ def main():
     logger.info("🚀 Starting SMART VERIFICATION BOT...")
     logger.info(f"✅ Admin ID: {ADMIN_ID}")
     logger.info(f"✅ Storage: {STORAGE_FILE}")
+    logger.info(f"✅ Random Emojis: {len(CAPTION_EMOJIS)} emojis")
+    logger.info(f"✅ Random Intervals: 12-28 minutes")
 
     # Load saved data
     load_data()
@@ -2106,7 +2115,7 @@ def main():
     app.add_handler(
         CommandHandler("clear_channel_caption", clear_channel_caption))
     
-    # NEW: Promo image commands
+    # Promo image commands
     app.add_handler(CommandHandler("set_promo1", set_promo1_command))
     app.add_handler(CommandHandler("set_promo2", set_promo2_command))
     app.add_handler(CommandHandler("view_promos", view_promos_command))
@@ -2150,7 +2159,7 @@ def main():
     # Join request handler - THE KEY COMPONENT
     app.add_handler(ChatJoinRequestHandler(handle_join_request))
 
-    # Railway fix: Add error handler
+    # Error handler
     app.add_error_handler(error_handler)
 
     # Start scheduler
@@ -2177,7 +2186,8 @@ def main():
 
     logger.info(f"✅ Bot running - Owner: {ADMIN_ID}")
     logger.info(f"✅ Smart Verification: ENABLED")
-    logger.info(f"✅ Random Intervals: 15-45 minutes")
+    logger.info(f"✅ Random Intervals: 12-28 minutes")
+    logger.info(f"✅ Random Emojis: {len(CAPTION_EMOJIS)} emojis")
     logger.info(f"✅ Promo Pattern: 5th=Promo1, 10th=Promo2")
     logger.info(
         f"✅ Loaded: {len(MANAGED_CHANNELS)} channels, {len(UPLOADED_IMAGES)} images"
