@@ -1057,6 +1057,8 @@ async def verification_settings(update: Update,
 # ========== FALLBACK CHANNEL COMMANDS ==========
 async def set_fallback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set global fallback channel for rejected users"""
+    global GLOBAL_FALLBACK_CHANNEL
+    
     if await ignore_non_admin(update, context):
         return
 
@@ -1067,7 +1069,6 @@ async def set_fallback_command(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode='Markdown')
         return
 
-    global GLOBAL_FALLBACK_CHANNEL
     GLOBAL_FALLBACK_CHANNEL = context.args[0]
     save_data()
 
@@ -1078,10 +1079,11 @@ async def set_fallback_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def clear_fallback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear fallback channel"""
+    global GLOBAL_FALLBACK_CHANNEL
+    
     if await ignore_non_admin(update, context):
         return
 
-    global GLOBAL_FALLBACK_CHANNEL
     GLOBAL_FALLBACK_CHANNEL = ""
     save_data()
 
@@ -1557,6 +1559,8 @@ async def clear_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_default_caption(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
     """Set default caption for posts"""
+    global DEFAULT_CAPTION
+    
     if await ignore_non_admin(update, context):
         return
 
@@ -1566,7 +1570,6 @@ async def set_default_caption(update: Update,
             parse_mode='Markdown')
         return
 
-    global DEFAULT_CAPTION
     DEFAULT_CAPTION = ' '.join(context.args)
     save_data()
 
@@ -1579,10 +1582,11 @@ async def set_default_caption(update: Update,
 async def clear_default_caption(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
     """Clear default caption"""
+    global DEFAULT_CAPTION
+    
     if await ignore_non_admin(update, context):
         return
 
-    global DEFAULT_CAPTION
     DEFAULT_CAPTION = ""
     save_data()
 
