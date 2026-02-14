@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import random
 import string
 import re
@@ -16,7 +16,7 @@ from apscheduler.triggers.cron import CronTrigger
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
 
-# Railway validation - only addition
+# Railway validation
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN not set! Add it in Railway Variables tab")
 if ADMIN_ID == 0:
@@ -40,13 +40,26 @@ CURRENT_IMAGE_INDEX = {}
 AUTO_POST_ENABLED = {}
 POSTING_INTERVAL_HOURS = 1
 
-# NEW: Promo image storage
+# Promo image storage
 PROMO_IMAGES = {}  # {channel_id: {'promo1': {...}, 'promo2': {...}}}
 POST_COUNTER = {}  # {channel_id: count} - tracks total posts for promo pattern
 
-# NEW: Emoji rotation for pattern breaking
+# NEW: Global fallback channel for rejected users
+GLOBAL_FALLBACK_CHANNEL = ""  # Set via /set_fallback command
+
+# NEW: Combined media storage (images + videos in upload order)
+CHANNEL_MEDIA_QUEUE = {}  # {channel_id: [{'type': 'photo'/'video', 'file_id': '...', 'caption': '...'}]}
+
+# NEW: Links storage for link-only channels
+CHANNEL_LINKS = {}  # {channel_id: ['link1', 'link2', ...]}
+CHANNEL_LINK_INDEX = {}  # {channel_id: current_index}
+
+# NEW: Channel content type configuration
+CHANNEL_CONTENT_TYPE = {}  # {channel_id: 'media' / 'links'}
+
+# Emoji rotation for pattern breaking
 CAPTION_EMOJIS = [
-    '🎬', '🔥', '⚡', '💎', '✨', '🎯', '🚀', '⭐', 
+    '🎬', '🔥', '⚡', '💎', '✨', '🎯', '🚀', '⭐',
     '🎭', '🎪', '🎨', '🎥', '🎞️', '📹', '📽️', '💥',
     '💫', '🌟', '👑', '🏆', '🥇', '🎉', '🎊', '🍿'
 ]
@@ -93,7 +106,13 @@ def save_data():
             'blocked_users': list(BLOCKED_USERS),
             'user_database': USER_DATABASE,
             'promo_images': PROMO_IMAGES,
-            'post_counter': POST_COUNTER
+            'post_counter': POST_COUNTER,
+            # NEW additions
+            'global_fallback_channel': GLOBAL_FALLBACK_CHANNEL,
+            'channel_media_queue': CHANNEL_MEDIA_QUEUE,
+            'channel_links': CHANNEL_LINKS,
+            'channel_link_index': CHANNEL_LINK_INDEX,
+            'channel_content_type': CHANNEL_CONTENT_TYPE
         }
         with open(STORAGE_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, default=str)
@@ -108,6 +127,8 @@ def load_data():
     global DEFAULT_CAPTION, CHANNEL_DEFAULT_CAPTIONS, AUTO_POST_ENABLED
     global CURRENT_IMAGE_INDEX, BULK_APPROVAL_MODE, BLOCKED_USERS, USER_DATABASE
     global PROMO_IMAGES, POST_COUNTER
+    global GLOBAL_FALLBACK_CHANNEL, CHANNEL_MEDIA_QUEUE, CHANNEL_LINKS
+    global CHANNEL_LINK_INDEX, CHANNEL_CONTENT_TYPE
 
     try:
         if os.path.exists(STORAGE_FILE):
@@ -127,39 +148,32 @@ def load_data():
             PROMO_IMAGES = data.get('promo_images', {})
             POST_COUNTER = data.get('post_counter', {})
 
-            # Convert string keys to int
-            MANAGED_CHANNELS = {
-                int(k) if str(k).lstrip('-').isdigit() else k: v
-                for k, v in MANAGED_CHANNELS.items()
-            }
-            CHANNEL_SPECIFIC_IMAGES = {
-                int(k) if str(k).lstrip('-').isdigit() else k: v
-                for k, v in CHANNEL_SPECIFIC_IMAGES.items()
-            }
-            AUTO_POST_ENABLED = {
-                int(k) if str(k).lstrip('-').isdigit() else k: v
-                for k, v in AUTO_POST_ENABLED.items()
-            }
-            CURRENT_IMAGE_INDEX = {
-                int(k) if str(k).lstrip('-').isdigit() else k: v
-                for k, v in CURRENT_IMAGE_INDEX.items()
-            }
-            BULK_APPROVAL_MODE = {
-                int(k) if str(k).lstrip('-').isdigit() else k: v
-                for k, v in BULK_APPROVAL_MODE.items()
-            }
-            CHANNEL_DEFAULT_CAPTIONS = {
-                int(k) if str(k).lstrip('-').isdigit() else k: v
-                for k, v in CHANNEL_DEFAULT_CAPTIONS.items()
-            }
-            PROMO_IMAGES = {
-                int(k) if str(k).lstrip('-').isdigit() else k: v
-                for k, v in PROMO_IMAGES.items()
-            }
-            POST_COUNTER = {
-                int(k) if str(k).lstrip('-').isdigit() else k: v
-                for k, v in POST_COUNTER.items()
-            }
+            # NEW additions
+            GLOBAL_FALLBACK_CHANNEL = data.get('global_fallback_channel', "")
+            CHANNEL_MEDIA_QUEUE = data.get('channel_media_queue', {})
+            CHANNEL_LINKS = data.get('channel_links', {})
+            CHANNEL_LINK_INDEX = data.get('channel_link_index', {})
+            CHANNEL_CONTENT_TYPE = data.get('channel_content_type', {})
+
+            # Convert string keys to int for all dictionaries
+            def convert_keys(d):
+                return {
+                    int(k) if str(k).lstrip('-').isdigit() else k: v
+                    for k, v in d.items()
+                }
+
+            MANAGED_CHANNELS = convert_keys(MANAGED_CHANNELS)
+            CHANNEL_SPECIFIC_IMAGES = convert_keys(CHANNEL_SPECIFIC_IMAGES)
+            AUTO_POST_ENABLED = convert_keys(AUTO_POST_ENABLED)
+            CURRENT_IMAGE_INDEX = convert_keys(CURRENT_IMAGE_INDEX)
+            BULK_APPROVAL_MODE = convert_keys(BULK_APPROVAL_MODE)
+            CHANNEL_DEFAULT_CAPTIONS = convert_keys(CHANNEL_DEFAULT_CAPTIONS)
+            PROMO_IMAGES = convert_keys(PROMO_IMAGES)
+            POST_COUNTER = convert_keys(POST_COUNTER)
+            CHANNEL_MEDIA_QUEUE = convert_keys(CHANNEL_MEDIA_QUEUE)
+            CHANNEL_LINKS = convert_keys(CHANNEL_LINKS)
+            CHANNEL_LINK_INDEX = convert_keys(CHANNEL_LINK_INDEX)
+            CHANNEL_CONTENT_TYPE = convert_keys(CHANNEL_CONTENT_TYPE)
 
             logger.info(
                 f"✅ Loaded: {len(MANAGED_CHANNELS)} channels, {len(UPLOADED_IMAGES)} images"
@@ -346,13 +360,38 @@ async def owner_only_check(update: Update,
         return False
 
 
+async def is_admin(update: Update) -> bool:
+    """Quick check if user is admin - for complete lockdown"""
+    if not update.effective_user:
+        return False
+    return update.effective_user.id == ADMIN_ID
+
+
+async def ignore_non_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Complete lockdown - ignore ALL non-admin interactions silently.
+    Returns True if should ignore (non-admin), False if admin.
+    """
+    if not update.effective_user:
+        return True  # Ignore
+
+    if update.effective_user.id != ADMIN_ID:
+        # Complete silence - no response, no logging for regular attempts
+        # Only log if they try commands (potential probe)
+        if update.message and update.message.text and update.message.text.startswith('/'):
+            logger.warning(f"🚫 Blocked command attempt from {update.effective_user.id}")
+        return True  # Ignore
+
+    return False  # Admin - proceed
+
+
 # ========== SMART JOIN REQUEST HANDLER ==========
 async def handle_join_request(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
     """
     Smart join request handler with 3-tier verification:
     1. Auto-approve legitimate users
-    2. Auto-reject obvious bots/spammers
+    2. Auto-reject obvious bots/spammers + send fallback channel
     3. Math captcha for borderline cases
     """
     request = update.chat_join_request
@@ -415,12 +454,27 @@ async def handle_join_request(update: Update,
         except Exception as e:
             logger.error(f"Auto-approval failed: {e}")
 
-    # === TIER 2: AUTO-REJECT OBVIOUS BOTS/SPAMMERS ===
+    # === TIER 2: AUTO-REJECT + REDIRECT TO FALLBACK CHANNEL ===
     if not legitimacy['legitimate'] and legitimacy['score'] == 0:
         try:
             await request.decline()
 
-            # Log to recent activity instead of sending notification
+            # NEW: Send fallback channel link to rejected user
+            if GLOBAL_FALLBACK_CHANNEL:
+                try:
+                    await context.bot.send_message(
+                        user.id,
+                        f"Your request to join was not approved.\n\n"
+                        f"You can join our public channel instead:\n"
+                        f"{GLOBAL_FALLBACK_CHANNEL}",
+                        disable_web_page_preview=True
+                    )
+                    logger.info(f"📤 Sent fallback channel to rejected user {user.id}")
+                except Exception as dm_error:
+                    # User might have blocked bot or never started it
+                    logger.warning(f"Could not DM user {user.id}: {dm_error}")
+
+            # Log to recent activity
             RECENT_ACTIVITY.append({
                 'type': 'auto_rejected',
                 'user_id': user.id,
@@ -429,6 +483,7 @@ async def handle_join_request(update: Update,
                 'channel': MANAGED_CHANNELS[chat_id]['name'],
                 'channel_id': chat_id,
                 'reason': legitimacy.get('reason', 'Suspicious'),
+                'fallback_sent': bool(GLOBAL_FALLBACK_CHANNEL),
                 'timestamp': datetime.now()
             })
 
@@ -549,6 +604,9 @@ async def resend_code_callback(update: Update,
 # ========== COMMAND HANDLERS ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command with all commands listed"""
+    if await ignore_non_admin(update, context):
+        return
+
     user = update.effective_user
 
     if user.id == ADMIN_ID:
@@ -563,8 +621,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "━━━ SETUP & INFO ━━━\n"
             "/start - This menu\n"
             "/addchannel - Add channel\n"
+            "/removechannel - Remove channel\n"
             "/channels - List channels\n"
+            "/view_config - Full config\n"
             "/stats - Statistics\n\n"
+
+            "━━━ VERIFICATION ━━━\n"
+            "/set_fallback - Fallback channel\n"
+            "/clear_fallback - Clear fallback\n"
+            "/verification_settings - View\n\n"
 
             "━━━ ACTIVITY ━━━\n"
             "/recent_activity - Who joined\n"
@@ -575,22 +640,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/approve_user - Approve one\n"
             "/approve_all_pending - Approve all\n"
             "/block_user - Block user\n"
-            "/unblock_user - Unblock\n\n"
+            "/unblock_user - Unblock\n"
+            "/toggle_bulk - Change mode\n\n"
 
-            "━━━ SETTINGS ━━━\n"
-            "/toggle_bulk - Change mode\n"
-            "/verification_settings - View\n\n"
+            "━━━ MEDIA UPLOAD ━━━\n"
+            "/upload_media - Images+Videos\n"
+            "/done_media - Finish upload\n"
+            "/list_media - View media\n"
+            "/clear_media - Clear media\n\n"
 
-            "━━━ POSTING ━━━\n"
-            "/post - Post content\n"
-            "/send_to_channel - Quick send\n"
-            "/clear_channel_media - Clear media\n\n"
+            "━━━ LINKS UPLOAD ━━━\n"
+            "/upload_links - Upload links\n"
+            "/done_links - Finish links\n"
+            "/list_links - View links\n"
+            "/clear_links - Clear links\n\n"
 
-            "━━━ IMAGES ━━━\n"
-            "/upload_images - Upload\n"
-            "/done_uploading - Finish\n"
-            "/list_images - View list\n"
-            "/clear_images - Delete all\n\n"
+            "━━━ CHANNEL CONFIG ━━━\n"
+            "/set_channel_type - media/links\n"
+            "/set_channel_caption - Caption\n"
+            "/clear_channel_caption - Clear\n\n"
 
             "━━━ PROMO IMAGES ━━━\n"
             "/set_promo1 - Set promo 1\n"
@@ -604,27 +672,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/disable_autopost - Disable\n"
             "/autopost_status - Check\n\n"
 
+            "━━━ QUICK SEND ━━━\n"
+            "/post - Post content\n"
+            "/send_to_channel - Quick send\n"
+            "/cancel - Cancel operation\n\n"
+
+            "━━━ OLD COMMANDS ━━━\n"
+            "/upload_images - Old image upload\n"
+            "/list_images - Old images\n"
+            "/clear_images - Clear old\n\n"
+
             "━━━ ANALYTICS ━━━\n"
             "/user_stats - Stats\n"
-            "/export_users - Export CSV\n\n"
-
-            "━━━ SECURITY ━━━\n"
-            "/view_unauthorized - Check\n"
-            "/clear_unauthorized - Clear"
+            "/export_users - Export CSV"
         )
-    else:
-        text = "Hello! This bot is for channel management."
-
-    await update.message.reply_text(text)
+        await update.message.reply_text(text)
 
 
 async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add a channel to manage"""
-    logger.info(f"📢 add_channel called by user {update.effective_user.id}")
-    
-    if not await owner_only_check(update, context):
-        logger.warning(f"❌ Owner check failed for user {update.effective_user.id}")
+    if await ignore_non_admin(update, context):
         return
+
+    logger.info(f"📢 add_channel called by user {update.effective_user.id}")
 
     if not context.args or len(context.args) < 2:
         logger.info("❌ Invalid args - showing usage")
@@ -637,20 +707,20 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         channel_id = int(context.args[0])
         channel_name = ' '.join(context.args[1:])
-        
+
         logger.info(f"📢 Attempting to add channel: {channel_name} ({channel_id})")
 
         # Check if bot is admin
         is_admin = await is_bot_admin(context, channel_id)
         logger.info(f"🔍 Bot admin check for {channel_id}: {is_admin}")
-        
+
         if not is_admin:
             await update.message.reply_text("❌ Bot is not admin in that channel")
             return
 
         MANAGED_CHANNELS[channel_id] = {'name': channel_name}
         save_data()
-        
+
         logger.info(f"✅ Channel added successfully: {channel_name} ({channel_id})")
         logger.info(f"📊 Total managed channels: {len(MANAGED_CHANNELS)}")
 
@@ -670,17 +740,61 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
 
+async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove a channel from management"""
+    if await ignore_non_admin(update, context):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/removechannel CHANNEL_ID`",
+            parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+
+        if channel_id in MANAGED_CHANNELS:
+            channel_name = MANAGED_CHANNELS[channel_id]['name']
+            del MANAGED_CHANNELS[channel_id]
+
+            # Clean up related data
+            if channel_id in AUTO_POST_ENABLED:
+                del AUTO_POST_ENABLED[channel_id]
+            if channel_id in CHANNEL_MEDIA_QUEUE:
+                del CHANNEL_MEDIA_QUEUE[channel_id]
+            if channel_id in CHANNEL_LINKS:
+                del CHANNEL_LINKS[channel_id]
+            if channel_id in CHANNEL_CONTENT_TYPE:
+                del CHANNEL_CONTENT_TYPE[channel_id]
+
+            # Remove scheduler job
+            try:
+                scheduler.remove_job(f'autopost_{channel_id}')
+            except:
+                pass
+
+            save_data()
+
+            await update.message.reply_text(
+                f"✅ Channel removed!\n\n"
+                f"Name: {channel_name}\n"
+                f"ID: `{channel_id}`",
+                parse_mode='Markdown')
+        else:
+            await update.message.reply_text("❌ Channel not found")
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID")
+
 
 async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all managed channels"""
-    logger.info(f"📋 list_channels called by user {update.effective_user.id}")
-    
-    if not await owner_only_check(update, context):
-        logger.warning(f"❌ Owner check failed for user {update.effective_user.id}")
+    if await ignore_non_admin(update, context):
         return
 
-    logger.info(f"📊 Current MANAGED_CHANNELS: {MANAGED_CHANNELS}")
-    
+    logger.info(f"📋 list_channels called by user {update.effective_user.id}")
+
     if not MANAGED_CHANNELS:
         logger.info("ℹ️ No channels in database")
         await update.message.reply_text("No channels added yet")
@@ -689,9 +803,14 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "📢 *Managed Channels:*\n\n"
     for channel_id, data in MANAGED_CHANNELS.items():
         bulk_status = "🔄 Bulk" if BULK_APPROVAL_MODE.get(channel_id, False) else "🛡️ Smart"
-        text += f"{data['name']}\n"
+        content_type = CHANNEL_CONTENT_TYPE.get(channel_id, 'media')
+        auto_post = "✅" if AUTO_POST_ENABLED.get(channel_id, False) else "❌"
+
+        text += f"*{data['name']}*\n"
         text += f"ID: `{channel_id}`\n"
-        text += f"Mode: {bulk_status}\n\n"
+        text += f"Mode: {bulk_status}\n"
+        text += f"Type: {content_type}\n"
+        text += f"Auto-Post: {auto_post}\n\n"
 
     logger.info(f"✅ Sending channel list with {len(MANAGED_CHANNELS)} channels")
     await update.message.reply_text(text, parse_mode='Markdown')
@@ -699,7 +818,7 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def pending_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show pending verification requests"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not PENDING_VERIFICATIONS:
@@ -719,7 +838,7 @@ async def pending_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def manual_approve_user(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
     """Manually approve a user"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
@@ -764,7 +883,7 @@ async def manual_approve_user(update: Update,
 async def approve_all_pending(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
     """Approve all pending verifications"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not PENDING_VERIFICATIONS:
@@ -798,7 +917,7 @@ async def approve_all_pending(update: Update,
 async def bulk_approve_from_file(update: Update,
                                  context: ContextTypes.DEFAULT_TYPE):
     """Placeholder for bulk approve from file"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     await update.message.reply_text(
@@ -810,7 +929,7 @@ async def bulk_approve_from_file(update: Update,
 async def toggle_bulk_approval(update: Update,
                                context: ContextTypes.DEFAULT_TYPE):
     """Toggle bulk approval mode for a channel"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
@@ -851,7 +970,7 @@ async def toggle_bulk_approval(update: Update,
 
 async def block_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Block a user from all channels"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
@@ -879,7 +998,7 @@ async def block_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def unblock_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Unblock a user"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
@@ -909,7 +1028,7 @@ async def unblock_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def verification_settings(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
     """Show verification settings"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     text = (
@@ -928,15 +1047,395 @@ async def verification_settings(update: Update,
         f"*Current Settings:*\n"
         f"Profile Photo Required: {REQUIRE_PROFILE_PHOTO}\n"
         f"Min Account Age: {MIN_ACCOUNT_AGE_DAYS} days\n"
-        f"Random Emojis: {len(CAPTION_EMOJIS)} emojis"
+        f"Random Emojis: {len(CAPTION_EMOJIS)} emojis\n"
+        f"Fallback Channel: {GLOBAL_FALLBACK_CHANNEL or 'Not set'}"
     )
+
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+# ========== FALLBACK CHANNEL COMMANDS ==========
+async def set_fallback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set global fallback channel for rejected users"""
+    if await ignore_non_admin(update, context):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/set_fallback https://t.me/yourchannel`\n\n"
+            f"Current: {GLOBAL_FALLBACK_CHANNEL or 'Not set'}",
+            parse_mode='Markdown')
+        return
+
+    global GLOBAL_FALLBACK_CHANNEL
+    GLOBAL_FALLBACK_CHANNEL = context.args[0]
+    save_data()
+
+    await update.message.reply_text(
+        f"✅ Fallback channel set!\n\n"
+        f"Rejected users will see:\n{GLOBAL_FALLBACK_CHANNEL}")
+
+
+async def clear_fallback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear fallback channel"""
+    if await ignore_non_admin(update, context):
+        return
+
+    global GLOBAL_FALLBACK_CHANNEL
+    GLOBAL_FALLBACK_CHANNEL = ""
+    save_data()
+
+    await update.message.reply_text("✅ Fallback channel cleared")
+
+
+# ========== MEDIA UPLOAD COMMANDS (Images + Videos) ==========
+async def upload_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start media upload mode for a channel (images + videos in sequence)"""
+    if await ignore_non_admin(update, context):
+        return
+
+    if not context.args:
+        # Show channels
+        if not MANAGED_CHANNELS:
+            await update.message.reply_text("No channels added yet. Use /addchannel first")
+            return
+
+        text = "📤 *Upload Media (Images + Videos)*\n\n"
+        text += "Usage: `/upload_media CHANNEL_ID`\n\n"
+        text += "Your channels:\n"
+        for channel_id, data in MANAGED_CHANNELS.items():
+            media_count = len(CHANNEL_MEDIA_QUEUE.get(channel_id, []))
+            text += f"• {data['name']}\n  ID: `{channel_id}`\n  Media: {media_count}\n\n"
+
+        await update.message.reply_text(text, parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+
+        if channel_id not in MANAGED_CHANNELS:
+            await update.message.reply_text("❌ Channel not managed")
+            return
+
+        context.user_data['media_upload_channel'] = channel_id
+        context.user_data['media_upload_mode'] = True
+
+        # Set channel content type to media
+        CHANNEL_CONTENT_TYPE[channel_id] = 'media'
+        save_data()
+
+        await update.message.reply_text(
+            f"📤 *Media Upload Mode: {MANAGED_CHANNELS[channel_id]['name']}*\n\n"
+            f"✅ Send IMAGES and VIDEOS now\n"
+            f"📝 With or without captions\n"
+            f"🔢 They will post in the EXACT order you send them\n"
+            f"🔇 Silent mode - no notifications per upload\n\n"
+            f"Use /done_media when finished",
+            parse_mode='Markdown')
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID")
+
+
+async def done_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Finish media upload mode"""
+    if await ignore_non_admin(update, context):
+        return
+
+    channel_id = context.user_data.get('media_upload_channel')
+    context.user_data['media_upload_mode'] = False
+    context.user_data['media_upload_channel'] = None
+
+    if channel_id:
+        count = len(CHANNEL_MEDIA_QUEUE.get(channel_id, []))
+        channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
+
+        # Count by type
+        images = sum(1 for m in CHANNEL_MEDIA_QUEUE.get(channel_id, []) if m['type'] == 'photo')
+        videos = sum(1 for m in CHANNEL_MEDIA_QUEUE.get(channel_id, []) if m['type'] == 'video')
+
+        await update.message.reply_text(
+            f"✅ *Media Upload Complete!*\n\n"
+            f"Channel: {channel_name}\n"
+            f"Total Media: {count}\n"
+            f"📷 Images: {images}\n"
+            f"🎬 Videos: {videos}\n\n"
+            f"Use `/enable_autopost {channel_id}` to start posting!",
+            parse_mode='Markdown')
+    else:
+        await update.message.reply_text("✅ Upload mode ended")
+
+
+async def list_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List media for all channels"""
+    if await ignore_non_admin(update, context):
+        return
+
+    text = "📂 *Media Library*\n\n"
+
+    # Old format images
+    text += f"Global Images (old): {len(UPLOADED_IMAGES)}\n\n"
+
+    # New format media queues
+    text += "━━━ Channel Media Queues ━━━\n\n"
+
+    for channel_id, media_list in CHANNEL_MEDIA_QUEUE.items():
+        channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
+        images = sum(1 for m in media_list if m['type'] == 'photo')
+        videos = sum(1 for m in media_list if m['type'] == 'video')
+        current_idx = CURRENT_IMAGE_INDEX.get(channel_id, 0)
+
+        text += f"📢 {channel_name}\n"
+        text += f"   📷 Images: {images}\n"
+        text += f"   🎬 Videos: {videos}\n"
+        text += f"   Total: {len(media_list)}\n"
+        text += f"   Current Index: {current_idx}\n\n"
+
+    if not CHANNEL_MEDIA_QUEUE:
+        text += "No media uploaded yet.\n"
+        text += "Use `/upload_media CHANNEL_ID` to start"
+
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def clear_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear media for a channel"""
+    if await ignore_non_admin(update, context):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/clear_media CHANNEL_ID`\n\n"
+            "Or `/clear_media all` to clear everything",
+            parse_mode='Markdown')
+        return
+
+    if context.args[0].lower() == 'all':
+        CHANNEL_MEDIA_QUEUE.clear()
+        CURRENT_IMAGE_INDEX.clear()
+        save_data()
+        await update.message.reply_text("✅ All media cleared")
+        return
+
+    try:
+        channel_id = int(context.args[0])
+
+        if channel_id in CHANNEL_MEDIA_QUEUE:
+            count = len(CHANNEL_MEDIA_QUEUE[channel_id])
+            del CHANNEL_MEDIA_QUEUE[channel_id]
+            if channel_id in CURRENT_IMAGE_INDEX:
+                del CURRENT_IMAGE_INDEX[channel_id]
+            save_data()
+            await update.message.reply_text(f"✅ Cleared {count} media items")
+        else:
+            await update.message.reply_text("❌ No media for this channel")
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID")
+
+
+# ========== LINKS UPLOAD COMMANDS ==========
+async def upload_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start links upload mode - send a TXT file with links"""
+    if await ignore_non_admin(update, context):
+        return
+
+    if not context.args:
+        if not MANAGED_CHANNELS:
+            await update.message.reply_text("No channels added yet")
+            return
+
+        text = "🔗 *Upload Links*\n\n"
+        text += "Usage: `/upload_links CHANNEL_ID`\n\n"
+        text += "Then send a .txt file with one link per line\n"
+        text += "Or send links as text messages\n\n"
+        text += "Your channels:\n"
+        for channel_id, data in MANAGED_CHANNELS.items():
+            links_count = len(CHANNEL_LINKS.get(channel_id, []))
+            text += f"• {data['name']}: {links_count} links\n"
+
+        await update.message.reply_text(text, parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+
+        if channel_id not in MANAGED_CHANNELS:
+            await update.message.reply_text("❌ Channel not managed")
+            return
+
+        context.user_data['links_upload_channel'] = channel_id
+        context.user_data['links_upload_mode'] = True
+
+        # Set channel content type to links
+        CHANNEL_CONTENT_TYPE[channel_id] = 'links'
+        save_data()
+
+        await update.message.reply_text(
+            f"🔗 *Links Upload Mode: {MANAGED_CHANNELS[channel_id]['name']}*\n\n"
+            f"Send a .txt file with links (one per line)\n\n"
+            f"Or send links as text messages (one per message)\n\n"
+            f"Use /done_links when finished",
+            parse_mode='Markdown')
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID")
+
+
+async def done_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Finish links upload mode"""
+    if await ignore_non_admin(update, context):
+        return
+
+    channel_id = context.user_data.get('links_upload_channel')
+    context.user_data['links_upload_mode'] = False
+    context.user_data['links_upload_channel'] = None
+
+    if channel_id:
+        count = len(CHANNEL_LINKS.get(channel_id, []))
+        channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
+
+        await update.message.reply_text(
+            f"✅ *Links Upload Complete!*\n\n"
+            f"Channel: {channel_name}\n"
+            f"Total Links: {count}\n\n"
+            f"Use `/enable_autopost {channel_id}` to start posting!",
+            parse_mode='Markdown')
+    else:
+        await update.message.reply_text("✅ Links mode ended")
+
+
+async def list_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List links for all channels"""
+    if await ignore_non_admin(update, context):
+        return
+
+    text = "🔗 *Links Library*\n\n"
+
+    for channel_id, links in CHANNEL_LINKS.items():
+        channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
+        current_idx = CHANNEL_LINK_INDEX.get(channel_id, 0)
+
+        text += f"📢 {channel_name}\n"
+        text += f"   Links: {len(links)}\n"
+        text += f"   Current Index: {current_idx}\n\n"
+
+    if not CHANNEL_LINKS:
+        text += "No links uploaded yet.\n"
+        text += "Use `/upload_links CHANNEL_ID` to start"
+
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def clear_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear links for a channel"""
+    if await ignore_non_admin(update, context):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/clear_links CHANNEL_ID`",
+            parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+
+        if channel_id in CHANNEL_LINKS:
+            count = len(CHANNEL_LINKS[channel_id])
+            del CHANNEL_LINKS[channel_id]
+            if channel_id in CHANNEL_LINK_INDEX:
+                del CHANNEL_LINK_INDEX[channel_id]
+            save_data()
+            await update.message.reply_text(f"✅ Cleared {count} links")
+        else:
+            await update.message.reply_text("❌ No links for this channel")
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID")
+
+
+# ========== CHANNEL CONFIG COMMANDS ==========
+async def set_channel_type_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set channel content type (media or links)"""
+    if await ignore_non_admin(update, context):
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: `/set_channel_type CHANNEL_ID TYPE`\n\n"
+            "Types:\n"
+            "• `media` - Post images and videos\n"
+            "• `links` - Post links only",
+            parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+        content_type = context.args[1].lower()
+
+        if channel_id not in MANAGED_CHANNELS:
+            await update.message.reply_text("❌ Channel not managed")
+            return
+
+        if content_type not in ['media', 'links']:
+            await update.message.reply_text("❌ Type must be 'media' or 'links'")
+            return
+
+        CHANNEL_CONTENT_TYPE[channel_id] = content_type
+        save_data()
+
+        await update.message.reply_text(
+            f"✅ Channel type set!\n\n"
+            f"Channel: {MANAGED_CHANNELS[channel_id]['name']}\n"
+            f"Type: {content_type}")
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID")
+
+
+async def view_channel_config_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View complete channel configuration"""
+    if await ignore_non_admin(update, context):
+        return
+
+    if not MANAGED_CHANNELS:
+        await update.message.reply_text("No channels configured")
+        return
+
+    text = "📋 *Channel Configuration*\n\n"
+
+    for channel_id, data in MANAGED_CHANNELS.items():
+        content_type = CHANNEL_CONTENT_TYPE.get(channel_id, 'media')
+        bulk_mode = BULK_APPROVAL_MODE.get(channel_id, False)
+        auto_post = AUTO_POST_ENABLED.get(channel_id, False)
+
+        # Count content
+        media_count = len(CHANNEL_MEDIA_QUEUE.get(channel_id, []))
+        links_count = len(CHANNEL_LINKS.get(channel_id, []))
+        old_images = len(CHANNEL_SPECIFIC_IMAGES.get(channel_id, []))
+        current_idx = CURRENT_IMAGE_INDEX.get(channel_id, 0)
+        post_count = POST_COUNTER.get(channel_id, 0)
+
+        text += f"📢 *{data['name']}*\n"
+        text += f"   ID: `{channel_id}`\n"
+        text += f"   Type: {content_type}\n"
+        text += f"   Approval: {'🔄 Bulk' if bulk_mode else '🛡️ Smart'}\n"
+        text += f"   Auto-Post: {'✅ ON' if auto_post else '❌ OFF'}\n"
+        text += f"   Media Queue: {media_count}\n"
+        text += f"   Links: {links_count}\n"
+        text += f"   Old Images: {old_images}\n"
+        text += f"   Current Index: {current_idx}\n"
+        text += f"   Posts Made: {post_count}\n\n"
+
+    text += f"\n🌐 Fallback Channel: {GLOBAL_FALLBACK_CHANNEL or 'Not set'}"
 
     await update.message.reply_text(text, parse_mode='Markdown')
 
 
 async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start posting mode"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     context.user_data['posting_mode'] = True
@@ -948,32 +1447,31 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def upload_images_command(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
-    """Start image upload mode"""
-    if not await owner_only_check(update, context):
+    """Start image upload mode (OLD - for backward compatibility)"""
+    if await ignore_non_admin(update, context):
         return
 
     context.user_data['uploading_mode'] = True
-    context.user_data['uploading_for_channel'] = None  # Clear channel-specific flag
+    context.user_data['uploading_for_channel'] = None
     await update.message.reply_text(
-        "📤 *Upload Mode: SILENT*\n\n"
+        "📤 *Upload Mode: SILENT (Legacy)*\n\n"
         "✅ Send images now (with or without captions)\n"
         "📝 Images with captions will use those captions\n"
         "🔇 No notifications per image (silent mode)\n"
         "✅ Use /done_uploading to see summary\n\n"
-        "Ready for your images! 🚀",
+        "💡 NEW: Use /upload_media for images+videos!",
         parse_mode='Markdown')
 
 
 async def done_uploading(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop upload mode with comprehensive summary"""
-    if not await owner_only_check(update, context):
+    """Stop upload mode with comprehensive summary (OLD)"""
+    if await ignore_non_admin(update, context):
         return
 
     context.user_data['uploading_mode'] = False
     channel_id = context.user_data.get('uploading_for_channel')
-    
+
     if channel_id:
-        # Channel-specific upload
         count = len(CHANNEL_SPECIFIC_IMAGES.get(channel_id, []))
         channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
         await update.message.reply_text(
@@ -984,7 +1482,6 @@ async def done_uploading(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown')
         context.user_data['uploading_for_channel'] = None
     else:
-        # Global upload
         await update.message.reply_text(
             f"✅ *Upload Complete!*\n\n"
             f"Total Global Images: {len(UPLOADED_IMAGES)}\n\n"
@@ -994,13 +1491,14 @@ async def done_uploading(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def upload_for_channel_command(update: Update,
                                      context: ContextTypes.DEFAULT_TYPE):
-    """Upload images for specific channel"""
-    if not await owner_only_check(update, context):
+    """Upload images for specific channel (OLD)"""
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
         await update.message.reply_text(
-            "Usage: `/upload_for_channel CHANNEL_ID`",
+            "Usage: `/upload_for_channel CHANNEL_ID`\n\n"
+            "💡 NEW: Use /upload_media for images+videos!",
             parse_mode='Markdown')
         return
 
@@ -1020,7 +1518,7 @@ async def upload_for_channel_command(update: Update,
             f"📝 These images are exclusive to this channel\n"
             f"🔇 Silent mode - no notifications per image\n"
             f"✅ Use /done_uploading to see summary\n\n"
-            f"Ready for your images! 🚀",
+            f"💡 NEW: Use /upload_media for images+videos!",
             parse_mode='Markdown')
 
     except ValueError:
@@ -1028,36 +1526,38 @@ async def upload_for_channel_command(update: Update,
 
 
 async def list_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List uploaded images"""
-    if not await owner_only_check(update, context):
+    """List uploaded images (OLD)"""
+    if await ignore_non_admin(update, context):
         return
 
-    text = f"📂 *Image Library*\n\n"
+    text = f"📂 *Image Library (Legacy)*\n\n"
     text += f"Global Images: {len(UPLOADED_IMAGES)}\n\n"
 
     for channel_id, images in CHANNEL_SPECIFIC_IMAGES.items():
         channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
         text += f"{channel_name}: {len(images)} images\n"
 
+    text += "\n💡 Use /list_media for new format"
+
     await update.message.reply_text(text, parse_mode='Markdown')
 
 
 async def clear_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Clear all images"""
-    if not await owner_only_check(update, context):
+    """Clear all images (OLD)"""
+    if await ignore_non_admin(update, context):
         return
 
     UPLOADED_IMAGES.clear()
     CHANNEL_SPECIFIC_IMAGES.clear()
     save_data()
 
-    await update.message.reply_text("✅ All images cleared")
+    await update.message.reply_text("✅ All legacy images cleared")
 
 
 async def set_default_caption(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
     """Set default caption for posts"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
@@ -1079,7 +1579,7 @@ async def set_default_caption(update: Update,
 async def clear_default_caption(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
     """Clear default caption"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     global DEFAULT_CAPTION
@@ -1092,7 +1592,7 @@ async def clear_default_caption(update: Update,
 async def set_channel_caption(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
     """Set channel-specific caption"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if len(context.args) < 2:
@@ -1124,7 +1624,7 @@ async def set_channel_caption(update: Update,
 async def clear_channel_caption(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
     """Clear channel-specific caption"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
@@ -1147,17 +1647,17 @@ async def clear_channel_caption(update: Update,
         await update.message.reply_text("❌ Invalid channel ID")
 
 
-# ========== NEW PROMO IMAGE COMMANDS ==========
+# ========== PROMO IMAGE COMMANDS ==========
 async def set_promo1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set promo image 1 for channel (posts at 5th, 15th, 25th...)"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
         await update.message.reply_text(
             "Usage: `/set_promo1 CHANNEL_ID`\n\n"
-            "Then send the promo image (with optional caption)\n"
-            "This image will post at positions: 5, 15, 25, 35...",
+            "Then send the promo image/video (with optional caption)\n"
+            "This will post at positions: 5, 15, 25, 35...",
             parse_mode='Markdown')
         return
 
@@ -1171,7 +1671,7 @@ async def set_promo1_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['setting_promo1'] = channel_id
         await update.message.reply_text(
             f"✅ Ready to set Promo 1 for {MANAGED_CHANNELS[channel_id]['name']}\n\n"
-            f"Send the promo image now (with optional caption)",
+            f"Send the promo image/video now (with optional caption)",
             parse_mode='Markdown')
 
     except ValueError:
@@ -1180,14 +1680,14 @@ async def set_promo1_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def set_promo2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set promo image 2 for channel (posts at 10th, 20th, 30th...)"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
         await update.message.reply_text(
             "Usage: `/set_promo2 CHANNEL_ID`\n\n"
-            "Then send the promo image (with optional caption)\n"
-            "This image will post at positions: 10, 20, 30, 40...",
+            "Then send the promo image/video (with optional caption)\n"
+            "This will post at positions: 10, 20, 30, 40...",
             parse_mode='Markdown')
         return
 
@@ -1201,7 +1701,7 @@ async def set_promo2_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['setting_promo2'] = channel_id
         await update.message.reply_text(
             f"✅ Ready to set Promo 2 for {MANAGED_CHANNELS[channel_id]['name']}\n\n"
-            f"Send the promo image now (with optional caption)",
+            f"Send the promo image/video now (with optional caption)",
             parse_mode='Markdown')
 
     except ValueError:
@@ -1210,7 +1710,7 @@ async def set_promo2_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def view_promos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View all promo images"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not PROMO_IMAGES:
@@ -1218,21 +1718,23 @@ async def view_promos_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     text = "🎯 *Promo Images Setup*\n\n"
-    
+
     for channel_id, promos in PROMO_IMAGES.items():
         channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
         text += f"📢 {channel_name}\n"
-        
+
         if 'promo1' in promos:
-            text += f"✅ Promo 1: Set (5th, 15th, 25th...)\n"
+            promo_type = promos['promo1'].get('type', 'photo')
+            text += f"✅ Promo 1: Set ({promo_type}) - 5th, 15th, 25th...\n"
         else:
             text += f"❌ Promo 1: Not set\n"
-            
+
         if 'promo2' in promos:
-            text += f"✅ Promo 2: Set (10th, 20th, 30th...)\n"
+            promo_type = promos['promo2'].get('type', 'photo')
+            text += f"✅ Promo 2: Set ({promo_type}) - 10th, 20th, 30th...\n"
         else:
             text += f"❌ Promo 2: Not set\n"
-        
+
         text += "\n"
 
     await update.message.reply_text(text, parse_mode='Markdown')
@@ -1240,7 +1742,7 @@ async def view_promos_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def clear_promo1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear promo image 1"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
@@ -1254,7 +1756,7 @@ async def clear_promo1_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if channel_id in PROMO_IMAGES and 'promo1' in PROMO_IMAGES[channel_id]:
             del PROMO_IMAGES[channel_id]['promo1']
-            if not PROMO_IMAGES[channel_id]:  # If empty dict, remove channel
+            if not PROMO_IMAGES[channel_id]:
                 del PROMO_IMAGES[channel_id]
             save_data()
             await update.message.reply_text("✅ Promo 1 cleared")
@@ -1267,7 +1769,7 @@ async def clear_promo1_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def clear_promo2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear promo image 2"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
@@ -1281,7 +1783,7 @@ async def clear_promo2_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if channel_id in PROMO_IMAGES and 'promo2' in PROMO_IMAGES[channel_id]:
             del PROMO_IMAGES[channel_id]['promo2']
-            if not PROMO_IMAGES[channel_id]:  # If empty dict, remove channel
+            if not PROMO_IMAGES[channel_id]:
                 del PROMO_IMAGES[channel_id]
             save_data()
             await update.message.reply_text("✅ Promo 2 cleared")
@@ -1294,7 +1796,7 @@ async def clear_promo2_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Enable auto-posting for a channel"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
@@ -1311,26 +1813,48 @@ async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         AUTO_POST_ENABLED[channel_id] = True
-        
+
         # Initialize post counter if not exists
         if channel_id not in POST_COUNTER:
             POST_COUNTER[channel_id] = 0
-        
+
         save_data()
 
-        # Schedule first post with random delay (12-28 minutes)
-        first_delay = random.randint(12, 28)
+        # Check content availability
+        content_type = CHANNEL_CONTENT_TYPE.get(channel_id, 'media')
+        if content_type == 'links':
+            content_count = len(CHANNEL_LINKS.get(channel_id, []))
+            content_label = "links"
+        else:
+            content_count = len(CHANNEL_MEDIA_QUEUE.get(channel_id, []))
+            if content_count == 0:
+                content_count = len(CHANNEL_SPECIFIC_IMAGES.get(channel_id, []))
+            if content_count == 0:
+                content_count = len(UPLOADED_IMAGES)
+            content_label = "media"
+
+        if content_count == 0:
+            await update.message.reply_text(
+                f"⚠️ Auto-post enabled but no {content_label} found!\n\n"
+                f"Upload {content_label} first:\n"
+                f"• /upload_media for images+videos\n"
+                f"• /upload_links for links")
+            return
+
+        # Schedule first post
+        first_delay = random.randint(1, 3)  # Start quickly
         scheduler.add_job(
             auto_post_job,
             'date',
-            run_date=datetime.now(),
+            run_date=datetime.now() + timedelta(minutes=first_delay),
             args=[context.bot, channel_id],
             id=f'autopost_{channel_id}',
             replace_existing=True)
 
         await update.message.reply_text(
             f"✅ Auto-post enabled for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
-            f"⏰ Random intervals: 12-28 minutes\n"
+            f"📦 Content: {content_count} {content_label}\n"
+            f"⏰ Intervals: 12-28 minutes (random)\n"
             f"🎯 Promo pattern active\n"
             f"🎨 Random emoji active ({len(CAPTION_EMOJIS)} emojis)\n"
             f"🚀 Starting in {first_delay} minutes",
@@ -1344,7 +1868,7 @@ async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def disable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Disable auto-posting for a channel"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
@@ -1367,7 +1891,7 @@ async def disable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
             await update.message.reply_text(
-                f"✅ Auto-post disabled for {MANAGED_CHANNELS[channel_id]['name']}")
+                f"✅ Auto-post disabled for {MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')}")
         else:
             await update.message.reply_text("❌ Auto-post not enabled for this channel")
 
@@ -1377,7 +1901,7 @@ async def disable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def autopost_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show auto-post status"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not AUTO_POST_ENABLED:
@@ -1389,15 +1913,28 @@ async def autopost_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if enabled:
             channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
             post_count = POST_COUNTER.get(channel_id, 0)
-            
+            content_type = CHANNEL_CONTENT_TYPE.get(channel_id, 'media')
+
             # Check promo status
             has_promo1 = channel_id in PROMO_IMAGES and 'promo1' in PROMO_IMAGES[channel_id]
             has_promo2 = channel_id in PROMO_IMAGES and 'promo2' in PROMO_IMAGES[channel_id]
-            
+
+            # Count content
+            if content_type == 'links':
+                content_count = len(CHANNEL_LINKS.get(channel_id, []))
+                current_idx = CHANNEL_LINK_INDEX.get(channel_id, 0)
+            else:
+                content_count = len(CHANNEL_MEDIA_QUEUE.get(channel_id, []))
+                if content_count == 0:
+                    content_count = len(CHANNEL_SPECIFIC_IMAGES.get(channel_id, []))
+                current_idx = CURRENT_IMAGE_INDEX.get(channel_id, 0)
+
             text += f"✅ {channel_name}\n"
-            text += f"   Posts: {post_count}\n"
+            text += f"   Type: {content_type}\n"
+            text += f"   Content: {content_count}\n"
+            text += f"   Posts Made: {post_count}\n"
+            text += f"   Current Index: {current_idx}\n"
             text += f"   Interval: 12-28 mins (random)\n"
-            text += f"   Emoji: {len(CAPTION_EMOJIS)} rotating\n"
             text += f"   Promo 1: {'✅' if has_promo1 else '❌'}\n"
             text += f"   Promo 2: {'✅' if has_promo2 else '❌'}\n\n"
 
@@ -1407,9 +1944,11 @@ async def autopost_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def auto_post_job(bot, channel_id: int):
     """
     Auto-posting job with:
-    1. Random emoji for each caption (pattern breaking)
-    2. Promo pattern (5th=promo1, 10th=promo2)
-    3. Random intervals (12-28 minutes)
+    1. Support for media queue (images + videos in sequence)
+    2. Support for links posting
+    3. Promo pattern (5th=promo1, 10th=promo2)
+    4. Random intervals (12-28 minutes)
+    5. Loop back when content is exhausted
     """
     try:
         if not AUTO_POST_ENABLED.get(channel_id):
@@ -1419,98 +1958,181 @@ async def auto_post_job(bot, channel_id: int):
         if channel_id not in POST_COUNTER:
             POST_COUNTER[channel_id] = 0
 
-        # Increment counter BEFORE posting (so first post is #1, not #0)
+        # Increment counter
         POST_COUNTER[channel_id] += 1
         current_position = POST_COUNTER[channel_id]
 
         logger.info(f"🎯 Auto-post #{current_position} for channel {channel_id}")
 
-        # Check if this position matches promo pattern
-        position_mod = current_position % 10
-        
-        image_to_post = None
-        caption_to_use = ""
-        is_promo = False
+        # Determine channel content type
+        content_type = CHANNEL_CONTENT_TYPE.get(channel_id, 'media')
 
-        # Promo Pattern Check
-        if position_mod == 5:  # 5th, 15th, 25th, 35th...
-            if channel_id in PROMO_IMAGES and 'promo1' in PROMO_IMAGES[channel_id]:
-                image_to_post = PROMO_IMAGES[channel_id]['promo1']
-                is_promo = True
-                logger.info(f"🎯 Using PROMO 1 at position {current_position}")
-        elif position_mod == 0:  # 10th, 20th, 30th, 40th...
-            if channel_id in PROMO_IMAGES and 'promo2' in PROMO_IMAGES[channel_id]:
-                image_to_post = PROMO_IMAGES[channel_id]['promo2']
-                is_promo = True
-                logger.info(f"🎯 Using PROMO 2 at position {current_position}")
-
-        # If not promo position or no promo set, use regular images
-        if not image_to_post:
-            # Get regular images for this channel
-            if channel_id in CHANNEL_SPECIFIC_IMAGES and CHANNEL_SPECIFIC_IMAGES[channel_id]:
-                images = CHANNEL_SPECIFIC_IMAGES[channel_id]
-            elif UPLOADED_IMAGES:
-                images = UPLOADED_IMAGES
-            else:
-                logger.warning(f"No images available for channel {channel_id}")
+        # ========== LINKS CHANNEL ==========
+        if content_type == 'links':
+            if channel_id not in CHANNEL_LINKS or not CHANNEL_LINKS[channel_id]:
+                logger.warning(f"No links available for channel {channel_id}")
+                # Schedule retry
+                scheduler.add_job(
+                    auto_post_job,
+                    'date',
+                    run_date=datetime.now() + timedelta(minutes=30),
+                    args=[bot, channel_id],
+                    id=f'autopost_{channel_id}',
+                    replace_existing=True)
                 return
 
-            # Initialize image index if needed
-            if channel_id not in CURRENT_IMAGE_INDEX:
-                CURRENT_IMAGE_INDEX[channel_id] = 0
+            # Get current link index
+            if channel_id not in CHANNEL_LINK_INDEX:
+                CHANNEL_LINK_INDEX[channel_id] = 0
 
-            # Get current image
-            idx = CURRENT_IMAGE_INDEX[channel_id]
-            image_to_post = images[idx]
+            idx = CHANNEL_LINK_INDEX[channel_id]
+            links = CHANNEL_LINKS[channel_id]
 
-            # Move to next image (loop back to start when done)
-            CURRENT_IMAGE_INDEX[channel_id] = (idx + 1) % len(images)
+            # Get link and move to next (loop when exhausted)
+            link = links[idx]
+            CHANNEL_LINK_INDEX[channel_id] = (idx + 1) % len(links)
 
-        # NEW: Select random emoji for this post
-        random_emoji = random.choice(CAPTION_EMOJIS)
+            if CHANNEL_LINK_INDEX[channel_id] == 0:
+                logger.info(f"🔄 Links looped for channel {channel_id}")
 
-        # Determine caption (priority: image caption > channel caption > default caption)
-        base_caption = ""
-        if isinstance(image_to_post, dict) and image_to_post.get('caption'):
-            base_caption = image_to_post['caption']
-        elif channel_id in CHANNEL_DEFAULT_CAPTIONS:
-            base_caption = CHANNEL_DEFAULT_CAPTIONS[channel_id]
-        elif DEFAULT_CAPTION:
-            base_caption = DEFAULT_CAPTION
+            # Post link without preview
+            await bot.send_message(
+                chat_id=channel_id,
+                text=link,
+                disable_web_page_preview=True
+            )
+
+            logger.info(f"✅ Posted link #{current_position} to channel {channel_id}")
+            save_data()
+
+        # ========== MEDIA CHANNEL (Images + Videos) ==========
         else:
+            # Check for promo pattern first
+            position_mod = current_position % 10
+            media_to_post = None
+            is_promo = False
+
+            # Promo Pattern Check
+            if position_mod == 5:  # 5th, 15th, 25th...
+                if channel_id in PROMO_IMAGES and 'promo1' in PROMO_IMAGES[channel_id]:
+                    media_to_post = PROMO_IMAGES[channel_id]['promo1']
+                    is_promo = True
+                    logger.info(f"🎯 Using PROMO 1 at position {current_position}")
+            elif position_mod == 0:  # 10th, 20th, 30th...
+                if channel_id in PROMO_IMAGES and 'promo2' in PROMO_IMAGES[channel_id]:
+                    media_to_post = PROMO_IMAGES[channel_id]['promo2']
+                    is_promo = True
+                    logger.info(f"🎯 Using PROMO 2 at position {current_position}")
+
+            # If not promo, get from media queue
+            if not media_to_post:
+                # Try new media queue first
+                if channel_id in CHANNEL_MEDIA_QUEUE and CHANNEL_MEDIA_QUEUE[channel_id]:
+                    media_list = CHANNEL_MEDIA_QUEUE[channel_id]
+
+                    # Initialize index if needed
+                    if channel_id not in CURRENT_IMAGE_INDEX:
+                        CURRENT_IMAGE_INDEX[channel_id] = 0
+
+                    idx = CURRENT_IMAGE_INDEX[channel_id]
+                    media_to_post = media_list[idx]
+
+                    # Move to next (loop when exhausted)
+                    CURRENT_IMAGE_INDEX[channel_id] = (idx + 1) % len(media_list)
+
+                    if CURRENT_IMAGE_INDEX[channel_id] == 0:
+                        logger.info(f"🔄 Media queue looped for channel {channel_id}")
+
+                # Fall back to old image format
+                elif channel_id in CHANNEL_SPECIFIC_IMAGES and CHANNEL_SPECIFIC_IMAGES[channel_id]:
+                    images = CHANNEL_SPECIFIC_IMAGES[channel_id]
+
+                    if channel_id not in CURRENT_IMAGE_INDEX:
+                        CURRENT_IMAGE_INDEX[channel_id] = 0
+
+                    idx = CURRENT_IMAGE_INDEX[channel_id]
+                    img = images[idx]
+
+                    media_to_post = {
+                        'type': 'photo',
+                        'file_id': img['file_id'] if isinstance(img, dict) else img,
+                        'caption': img.get('caption', '') if isinstance(img, dict) else ''
+                    }
+
+                    CURRENT_IMAGE_INDEX[channel_id] = (idx + 1) % len(images)
+
+                # Fall back to global images
+                elif UPLOADED_IMAGES:
+                    if channel_id not in CURRENT_IMAGE_INDEX:
+                        CURRENT_IMAGE_INDEX[channel_id] = 0
+
+                    idx = CURRENT_IMAGE_INDEX[channel_id]
+                    img = UPLOADED_IMAGES[idx]
+
+                    media_to_post = {
+                        'type': 'photo',
+                        'file_id': img['file_id'] if isinstance(img, dict) else img,
+                        'caption': img.get('caption', '') if isinstance(img, dict) else ''
+                    }
+
+                    CURRENT_IMAGE_INDEX[channel_id] = (idx + 1) % len(UPLOADED_IMAGES)
+
+                else:
+                    logger.warning(f"No media available for channel {channel_id}")
+                    # Schedule retry
+                    scheduler.add_job(
+                        auto_post_job,
+                        'date',
+                        run_date=datetime.now() + timedelta(minutes=30),
+                        args=[bot, channel_id],
+                        id=f'autopost_{channel_id}',
+                        replace_existing=True)
+                    return
+
+            # Select random emoji
+            random_emoji = random.choice(CAPTION_EMOJIS)
+
+            # Determine caption
             base_caption = ""
+            if media_to_post.get('caption'):
+                base_caption = media_to_post['caption']
+            elif channel_id in CHANNEL_DEFAULT_CAPTIONS:
+                base_caption = CHANNEL_DEFAULT_CAPTIONS[channel_id]
+            elif DEFAULT_CAPTION:
+                base_caption = DEFAULT_CAPTION
 
-        # Add random emoji at the beginning
-        if base_caption:
-            caption_to_use = f"{random_emoji} {base_caption}"
-        else:
-            caption_to_use = random_emoji
+            # Add random emoji
+            if base_caption:
+                caption_to_use = f"{random_emoji} {base_caption}"
+            else:
+                caption_to_use = random_emoji
 
-        # Get file_id
-        if isinstance(image_to_post, dict):
-            file_id = image_to_post['file_id']
-        else:
-            file_id = image_to_post  # Old format compatibility
+            # Get file_id and type
+            file_id = media_to_post['file_id']
+            media_type = media_to_post.get('type', 'photo')
 
-        # Post to channel
-        await bot.send_photo(
-            chat_id=channel_id,
-            photo=file_id,
-            caption=caption_to_use
-        )
+            # Post based on media type
+            if media_type == 'video':
+                await bot.send_video(
+                    chat_id=channel_id,
+                    video=file_id,
+                    caption=caption_to_use
+                )
+            else:
+                await bot.send_photo(
+                    chat_id=channel_id,
+                    photo=file_id,
+                    caption=caption_to_use
+                )
 
-        promo_label = " (PROMO)" if is_promo else ""
-        logger.info(f"✅ Posted #{current_position}{promo_label} with emoji {random_emoji} to channel {channel_id}")
+            promo_label = " (PROMO)" if is_promo else ""
+            logger.info(f"✅ Posted {media_type} #{current_position}{promo_label} to channel {channel_id}")
 
         save_data()
 
-        # NEW: Schedule next post with RANDOM interval (12-28 minutes)
+        # Schedule next post with random interval
         next_delay_minutes = random.randint(12, 28)
-        next_run_time = datetime.now()
-        
-        # Calculate next run time by adding random minutes
-        from datetime import timedelta
-        next_run_time = next_run_time + timedelta(minutes=next_delay_minutes)
+        next_run_time = datetime.now() + timedelta(minutes=next_delay_minutes)
 
         scheduler.add_job(
             auto_post_job,
@@ -1520,14 +2142,13 @@ async def auto_post_job(bot, channel_id: int):
             id=f'autopost_{channel_id}',
             replace_existing=True)
 
-        logger.info(f"⏰ Next post in {next_delay_minutes} minutes (at {next_run_time.strftime('%H:%M')})")
+        logger.info(f"⏰ Next post in {next_delay_minutes} minutes")
 
     except Exception as e:
         logger.error(f"❌ Auto-post failed for channel {channel_id}: {e}")
-        
-        # On error, retry in 20 minutes (fallback)
+
+        # Retry in 20 minutes on error
         try:
-            from datetime import timedelta
             retry_time = datetime.now() + timedelta(minutes=20)
             scheduler.add_job(
                 auto_post_job,
@@ -1543,7 +2164,7 @@ async def auto_post_job(bot, channel_id: int):
 async def export_users_report(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
     """Export user database"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not USER_DATABASE:
@@ -1569,11 +2190,11 @@ async def export_users_report(update: Update,
 async def user_stats_command(update: Update,
                              context: ContextTypes.DEFAULT_TYPE):
     """Show user statistics"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     total_users = len(USER_DATABASE)
-    approved_count = sum(1 for user in USER_DATABASE.values() 
+    approved_count = sum(1 for user in USER_DATABASE.values()
                         if any(ch['status'] == 'approved' for ch in user['channels'].values()))
 
     text = (
@@ -1590,7 +2211,7 @@ async def user_stats_command(update: Update,
 async def import_users_to_channel(update: Update,
                                   context: ContextTypes.DEFAULT_TYPE):
     """Import users (placeholder)"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     await update.message.reply_text("Import feature coming soon")
@@ -1599,7 +2220,7 @@ async def import_users_to_channel(update: Update,
 async def view_unauthorized_attempts(update: Update,
                                      context: ContextTypes.DEFAULT_TYPE):
     """View unauthorized access attempts"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not UNAUTHORIZED_ATTEMPTS:
@@ -1619,7 +2240,7 @@ async def view_unauthorized_attempts(update: Update,
 async def clear_unauthorized_log(update: Update,
                                  context: ContextTypes.DEFAULT_TYPE):
     """Clear unauthorized attempts log"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     UNAUTHORIZED_ATTEMPTS.clear()
@@ -1628,11 +2249,10 @@ async def clear_unauthorized_log(update: Update,
 
 async def send_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick send media/text to channel"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
-        # Show available channels
         if not MANAGED_CHANNELS:
             await update.message.reply_text("No channels added yet")
             return
@@ -1668,7 +2288,7 @@ async def send_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def clear_channel_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear all media from a channel"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not context.args:
@@ -1707,7 +2327,7 @@ async def clear_channel_media(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             "⚠️ To delete messages, I need message IDs.\n"
             "This feature requires message tracking.\n"
-            "Use /clear_images to clear bot's image storage instead.")
+            "Use /clear_media to clear bot's media storage instead.")
 
     except ValueError:
         await update.message.reply_text("Invalid channel ID or message count")
@@ -1717,7 +2337,7 @@ async def clear_channel_media(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel current operation"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     context.user_data.clear()
@@ -1726,7 +2346,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def view_recent_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View recent auto-approvals and auto-rejections"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     if not RECENT_ACTIVITY:
@@ -1748,7 +2368,7 @@ async def view_recent_activity(update: Update, context: ContextTypes.DEFAULT_TYP
     if approved:
         text += "━━━━━━━━━━━━━━━━━━\n"
         text += "✅ Recently Approved:\n\n"
-        for activity in approved[-10:]:  # Last 10
+        for activity in approved[-10:]:
             text += f"• {activity['user_name']}\n"
             text += f"  @{activity['username']}\n"
             text += f"  Channel: {activity['channel']}\n"
@@ -1758,9 +2378,10 @@ async def view_recent_activity(update: Update, context: ContextTypes.DEFAULT_TYP
     if rejected:
         text += "━━━━━━━━━━━━━━━━━━\n"
         text += "❌ Recently Rejected:\n\n"
-        for activity in rejected[-5:]:  # Last 5
+        for activity in rejected[-5:]:
             text += f"• {activity['user_name']}\n"
             text += f"  Reason: {activity['reason']}\n"
+            text += f"  Fallback: {'✅' if activity.get('fallback_sent') else '❌'}\n"
             text += f"  Time: {activity['timestamp'].strftime('%H:%M')}\n\n"
 
     await update.message.reply_text(text)
@@ -1768,7 +2389,7 @@ async def view_recent_activity(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def clear_recent_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear recent activity log"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     count = len(RECENT_ACTIVITY)
@@ -1779,7 +2400,7 @@ async def clear_recent_activity(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show bot statistics"""
-    if not await owner_only_check(update, context):
+    if await ignore_non_admin(update, context):
         return
 
     bulk_enabled = sum(1 for v in BULK_APPROVAL_MODE.values() if v)
@@ -1788,8 +2409,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Count recent activity
     recent_approved = sum(1 for a in RECENT_ACTIVITY if a['type'] == 'auto_approved')
     recent_rejected = sum(1 for a in RECENT_ACTIVITY if a['type'] == 'auto_rejected')
-    
-    # Count promo images
+
+    # Count content
+    total_media = sum(len(m) for m in CHANNEL_MEDIA_QUEUE.values())
+    total_links = sum(len(l) for l in CHANNEL_LINKS.values())
     promo_count = sum(1 for promos in PROMO_IMAGES.values() if promos)
 
     text = (f"📊 Statistics\n\n"
@@ -1799,14 +2422,17 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏳ Pending: {len(PENDING_VERIFICATIONS)}\n"
             f"✅ Recent Approved: {recent_approved}\n"
             f"❌ Recent Rejected: {recent_rejected}\n"
-            f"🚫 Blocked: {len(BLOCKED_USERS)}\n"
-            f"📂 Images: {len(UPLOADED_IMAGES)}\n"
+            f"🚫 Blocked: {len(BLOCKED_USERS)}\n\n"
+            f"📂 Media Queue: {total_media}\n"
+            f"🔗 Links: {total_links}\n"
+            f"📷 Old Images: {len(UPLOADED_IMAGES)}\n"
             f"🎯 Promo Channels: {promo_count}\n"
             f"🎨 Emoji Pool: {len(CAPTION_EMOJIS)} emojis\n"
             f"⏰ Posting: 12-28 mins (random)\n"
             f"🤖 Auto-Posts: {active_autoposts} active\n"
             f"👥 Total Users: {len(USER_DATABASE)}\n"
             f"🚨 Unauthorized: {len(UNAUTHORIZED_ATTEMPTS)}\n\n"
+            f"🌐 Fallback: {GLOBAL_FALLBACK_CHANNEL or 'Not set'}\n\n"
             f"Use /recent_activity for details\n\n"
             f"Status: Online 24/7 ✅")
     await update.message.reply_text(text)
@@ -1814,156 +2440,254 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_forwarded_message(update: Update,
                                    context: ContextTypes.DEFAULT_TYPE):
-    """Handle forwarded messages (placeholder)"""
-    if not update.effective_user or update.effective_user.id != ADMIN_ID:
+    """Handle forwarded messages"""
+    if await ignore_non_admin(update, context):
         return
 
     await update.message.reply_text("Forwarded message detected")
 
 
 async def handle_bulk_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle bulk file uploads (placeholder)"""
-    if not update.effective_user or update.effective_user.id != ADMIN_ID:
+    """Handle bulk file uploads"""
+    if await ignore_non_admin(update, context):
+        return
+
+    # Check if in links upload mode
+    if context.user_data.get('links_upload_mode'):
+        await handle_links_file(update, context)
         return
 
     await update.message.reply_text("Bulk file processing coming soon")
 
 
+async def handle_links_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle links from TXT files"""
+    if await ignore_non_admin(update, context):
+        return
+
+    if not context.user_data.get('links_upload_mode'):
+        return
+
+    channel_id = context.user_data.get('links_upload_channel')
+    if not channel_id:
+        return
+
+    message = update.message
+
+    # Handle TXT file
+    if message.document:
+        if message.document.file_name and message.document.file_name.endswith('.txt'):
+            try:
+                file = await context.bot.get_file(message.document.file_id)
+                file_bytes = await file.download_as_bytearray()
+                content = file_bytes.decode('utf-8')
+
+                # Extract links (one per line)
+                lines = content.strip().split('\n')
+
+                if channel_id not in CHANNEL_LINKS:
+                    CHANNEL_LINKS[channel_id] = []
+
+                links_added = 0
+                for line in lines:
+                    link = line.strip()
+                    if link and (link.startswith('http://') or link.startswith('https://')):
+                        CHANNEL_LINKS[channel_id].append(link)
+                        links_added += 1
+
+                save_data()
+
+                await update.message.reply_text(
+                    f"✅ Added {links_added} links from file!\n"
+                    f"Total links: {len(CHANNEL_LINKS[channel_id])}")
+
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error reading file: {e}")
+
+
 async def handle_verification_code(update: Update,
                                    context: ContextTypes.DEFAULT_TYPE):
     """Handle verification code from user"""
-    # This is for future feature where users can verify themselves
     pass
 
 
-async def handle_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle image uploads - SILENT mode with batch summary"""
-    if not update.effective_user or update.effective_user.id != ADMIN_ID:
+async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle image AND video uploads - SILENT mode with sequence preservation"""
+    if await ignore_non_admin(update, context):
         return
 
-    if not update.message.photo:
-        return
+    message = update.message
 
-    photo = update.message.photo[-1]
-    file_id = photo.file_id
-    caption = update.message.caption or ""
+    # Determine media type and get file_id
+    media_type = None
+    file_id = None
+    caption = message.caption or ""
+
+    if message.photo:
+        media_type = 'photo'
+        file_id = message.photo[-1].file_id
+    elif message.video:
+        media_type = 'video'
+        file_id = message.video.file_id
+    elif message.document:
+        # Check if it's a video sent as document
+        if message.document.mime_type and message.document.mime_type.startswith('video/'):
+            media_type = 'video'
+            file_id = message.document.file_id
+        # Check if it's an image sent as document
+        elif message.document.mime_type and message.document.mime_type.startswith('image/'):
+            media_type = 'photo'
+            file_id = message.document.file_id
+
+    if not media_type or not file_id:
+        return  # Not a media file we handle
 
     # Check if setting promo image
     if context.user_data.get('setting_promo1'):
         channel_id = context.user_data['setting_promo1']
-        
+
         if channel_id not in PROMO_IMAGES:
             PROMO_IMAGES[channel_id] = {}
-        
+
         PROMO_IMAGES[channel_id]['promo1'] = {
             'file_id': file_id,
+            'type': media_type,
             'caption': caption
         }
-        
+
         save_data()
         context.user_data['setting_promo1'] = None
-        
+
         await update.message.reply_text(
-            f"✅ Promo 1 set for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
-            f"Will post at positions: 5, 15, 25, 35...\n"
-            f"Emoji will be added automatically!",
+            f"✅ Promo 1 ({media_type}) set for {MANAGED_CHANNELS[channel_id]['name']}!",
             parse_mode='Markdown')
         return
 
     if context.user_data.get('setting_promo2'):
         channel_id = context.user_data['setting_promo2']
-        
+
         if channel_id not in PROMO_IMAGES:
             PROMO_IMAGES[channel_id] = {}
-        
+
         PROMO_IMAGES[channel_id]['promo2'] = {
             'file_id': file_id,
+            'type': media_type,
             'caption': caption
         }
-        
+
         save_data()
         context.user_data['setting_promo2'] = None
-        
+
         await update.message.reply_text(
-            f"✅ Promo 2 set for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
-            f"Will post at positions: 10, 20, 30, 40...\n"
-            f"Emoji will be added automatically!",
+            f"✅ Promo 2 ({media_type}) set for {MANAGED_CHANNELS[channel_id]['name']}!",
             parse_mode='Markdown')
         return
 
-    # Regular image upload
-    # Store as dictionary with file_id and caption
-    image_data = {
-        'file_id': file_id,
-        'caption': caption
-    }
+    # NEW: Handle media upload mode (images + videos in sequence)
+    if context.user_data.get('media_upload_mode'):
+        channel_id = context.user_data.get('media_upload_channel')
 
-    if context.user_data.get('uploading_for_channel'):
-        channel_id = context.user_data['uploading_for_channel']
-        if channel_id not in CHANNEL_SPECIFIC_IMAGES:
-            CHANNEL_SPECIFIC_IMAGES[channel_id] = []
-        CHANNEL_SPECIFIC_IMAGES[channel_id].append(image_data)
-        
-        # Silent - only log to console
-        logger.info(f"✅ Image added to channel {channel_id}. Total: {len(CHANNEL_SPECIFIC_IMAGES[channel_id])}")
-    else:
-        UPLOADED_IMAGES.append(image_data)
-        
-        # Silent - only log to console
-        logger.info(f"✅ Global image uploaded. Total: {len(UPLOADED_IMAGES)}")
+        if channel_id:
+            if channel_id not in CHANNEL_MEDIA_QUEUE:
+                CHANNEL_MEDIA_QUEUE[channel_id] = []
 
-    save_data()
-    
-    # NO REPLY MESSAGE - completely silent!
+            # Add to queue (maintains upload order!)
+            CHANNEL_MEDIA_QUEUE[channel_id].append({
+                'type': media_type,
+                'file_id': file_id,
+                'caption': caption
+            })
 
+            save_data()
 
-async def handle_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all content (text, images, videos)"""
-    # Safety check
-    if not update.effective_user or update.effective_user.id != ADMIN_ID:
+            # Silent - only log
+            count = len(CHANNEL_MEDIA_QUEUE[channel_id])
+            logger.info(f"✅ {media_type} added to channel {channel_id}. Total: {count}")
         return
 
-    # Handle verification code
-    if context.user_data.get('awaiting_code'):
-        await handle_verification_code(update, context)
-        return
-
-    # Handle image upload mode
+    # OLD: Handle old uploading mode (backward compatibility)
     if context.user_data.get('uploading_mode'):
-        await handle_image_upload(update, context)
+        if media_type == 'photo':
+            image_data = {
+                'file_id': file_id,
+                'caption': caption
+            }
+
+            if context.user_data.get('uploading_for_channel'):
+                channel_id = context.user_data['uploading_for_channel']
+                if channel_id not in CHANNEL_SPECIFIC_IMAGES:
+                    CHANNEL_SPECIFIC_IMAGES[channel_id] = []
+                CHANNEL_SPECIFIC_IMAGES[channel_id].append(image_data)
+                logger.info(f"✅ Image added to channel {channel_id}")
+            else:
+                UPLOADED_IMAGES.append(image_data)
+                logger.info(f"✅ Global image uploaded. Total: {len(UPLOADED_IMAGES)}")
+
+            save_data()
         return
 
     # Handle quick send mode
     if context.user_data.get('quick_send_mode'):
         channel_id = context.user_data.get('quick_send_channel')
-        message = update.message
 
         try:
-            if message.text:
-                await context.bot.send_message(channel_id, message.text)
-            elif message.photo:
-                await context.bot.send_photo(channel_id,
-                                             message.photo[-1].file_id,
-                                             caption=message.caption)
-            elif message.video:
-                await context.bot.send_video(channel_id,
-                                             message.video.file_id,
-                                             caption=message.caption)
-            elif message.document:
-                await context.bot.send_document(channel_id,
-                                                message.document.file_id,
-                                                caption=message.caption)
+            if media_type == 'photo':
+                await context.bot.send_photo(channel_id, file_id, caption=caption)
+            elif media_type == 'video':
+                await context.bot.send_video(channel_id, file_id, caption=caption)
 
             await update.message.reply_text(
                 f"✅ Sent to {MANAGED_CHANNELS[channel_id]['name']}\n\n"
                 f"Send more or use /cancel to stop")
         except Exception as e:
             await update.message.reply_text(f"❌ Failed: {str(e)}")
+        return
 
+
+async def handle_text_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text messages"""
+    if await ignore_non_admin(update, context):
+        return
+
+    # Check if in links upload mode
+    if context.user_data.get('links_upload_mode'):
+        channel_id = context.user_data.get('links_upload_channel')
+        if channel_id and update.message.text:
+            text = update.message.text.strip()
+
+            # Check if it's a link
+            if text.startswith('http://') or text.startswith('https://'):
+                if channel_id not in CHANNEL_LINKS:
+                    CHANNEL_LINKS[channel_id] = []
+
+                CHANNEL_LINKS[channel_id].append(text)
+                save_data()
+
+                # Silent - only log
+                logger.info(f"✅ Link added to channel {channel_id}. Total: {len(CHANNEL_LINKS[channel_id])}")
         return
 
     # Handle posting mode
-    if not context.user_data.get('posting_mode'):
+    if context.user_data.get('posting_mode'):
+        await handle_content_posting(update, context)
+        return
+
+    # Handle quick send mode
+    if context.user_data.get('quick_send_mode'):
+        channel_id = context.user_data.get('quick_send_channel')
+        if channel_id and update.message.text:
+            try:
+                await context.bot.send_message(channel_id, update.message.text)
+                await update.message.reply_text(
+                    f"✅ Sent to {MANAGED_CHANNELS[channel_id]['name']}\n\n"
+                    f"Send more or use /cancel to stop")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Failed: {str(e)}")
+
+
+async def handle_content_posting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle content for posting mode"""
+    if await ignore_non_admin(update, context):
         return
 
     message = update.message
@@ -2055,9 +2779,14 @@ async def post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def weekly_report_job(bot):
     """Weekly report job"""
+    active_autoposts = sum(1 for v in AUTO_POST_ENABLED.values() if v)
+    total_media = sum(len(m) for m in CHANNEL_MEDIA_QUEUE.values())
+
     text = (
         f"📊 *Weekly Report*\n\n"
         f"Channels: {len(MANAGED_CHANNELS)}\n"
+        f"Auto-Posts Active: {active_autoposts}\n"
+        f"Media in Queue: {total_media}\n"
         f"Total Users: {len(USER_DATABASE)}\n"
         f"Blocked: {len(BLOCKED_USERS)}\n\n"
         f"Status: All systems operational ✅"
@@ -2069,7 +2798,7 @@ async def weekly_report_job(bot):
         logger.error(f"Weekly report failed: {e}")
 
 
-# Railway fix: Add error handler
+# Error handler
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Log errors"""
     logger.error(f"Exception: {context.error}")
@@ -2077,21 +2806,29 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Main function to start the bot"""
-    logger.info("🚀 Starting SMART VERIFICATION BOT...")
+    logger.info("🚀 Starting SMART VERIFICATION BOT v2.0...")
     logger.info(f"✅ Admin ID: {ADMIN_ID}")
     logger.info(f"✅ Storage: {STORAGE_FILE}")
     logger.info(f"✅ Random Emojis: {len(CAPTION_EMOJIS)} emojis")
     logger.info(f"✅ Random Intervals: 12-28 minutes")
+    logger.info(f"✅ Media Support: Images + Videos")
+    logger.info(f"✅ Links Support: Enabled")
+    logger.info(f"✅ Admin Lockdown: Enabled")
 
     # Load saved data
     load_data()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Command handlers
+    # Command handlers - Basic
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addchannel", add_channel))
+    app.add_handler(CommandHandler("removechannel", remove_channel))
     app.add_handler(CommandHandler("channels", list_channels))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("cancel", cancel_command))
+
+    # Verification commands
     app.add_handler(CommandHandler("pending_users", pending_users))
     app.add_handler(CommandHandler("approve_user", manual_approve_user))
     app.add_handler(CommandHandler("approve_all_pending", approve_all_pending))
@@ -2099,62 +2836,85 @@ def main():
     app.add_handler(CommandHandler("toggle_bulk", toggle_bulk_approval))
     app.add_handler(CommandHandler("block_user", block_user))
     app.add_handler(CommandHandler("unblock_user", unblock_user))
-    app.add_handler(
-        CommandHandler("verification_settings", verification_settings))
+    app.add_handler(CommandHandler("verification_settings", verification_settings))
+
+    # Fallback channel commands
+    app.add_handler(CommandHandler("set_fallback", set_fallback_command))
+    app.add_handler(CommandHandler("clear_fallback", clear_fallback_command))
+
+    # NEW: Media upload commands
+    app.add_handler(CommandHandler("upload_media", upload_media_command))
+    app.add_handler(CommandHandler("done_media", done_media_command))
+    app.add_handler(CommandHandler("list_media", list_media_command))
+    app.add_handler(CommandHandler("clear_media", clear_media_command))
+
+    # NEW: Links upload commands
+    app.add_handler(CommandHandler("upload_links", upload_links_command))
+    app.add_handler(CommandHandler("done_links", done_links_command))
+    app.add_handler(CommandHandler("list_links", list_links_command))
+    app.add_handler(CommandHandler("clear_links", clear_links_command))
+
+    # NEW: Channel config commands
+    app.add_handler(CommandHandler("set_channel_type", set_channel_type_command))
+    app.add_handler(CommandHandler("view_config", view_channel_config_command))
+
+    # Posting commands
     app.add_handler(CommandHandler("post", post_command))
+    app.add_handler(CommandHandler("send_to_channel", send_to_channel))
+    app.add_handler(CommandHandler("clear_channel_media", clear_channel_media))
+
+    # OLD image upload commands (backward compatibility)
     app.add_handler(CommandHandler("upload_images", upload_images_command))
     app.add_handler(CommandHandler("done_uploading", done_uploading))
-    app.add_handler(
-        CommandHandler("upload_for_channel", upload_for_channel_command))
+    app.add_handler(CommandHandler("upload_for_channel", upload_for_channel_command))
     app.add_handler(CommandHandler("list_images", list_images))
     app.add_handler(CommandHandler("clear_images", clear_images))
+
+    # Caption commands
     app.add_handler(CommandHandler("set_default_caption", set_default_caption))
-    app.add_handler(
-        CommandHandler("clear_default_caption", clear_default_caption))
+    app.add_handler(CommandHandler("clear_default_caption", clear_default_caption))
     app.add_handler(CommandHandler("set_channel_caption", set_channel_caption))
-    app.add_handler(
-        CommandHandler("clear_channel_caption", clear_channel_caption))
-    
+    app.add_handler(CommandHandler("clear_channel_caption", clear_channel_caption))
+
     # Promo image commands
     app.add_handler(CommandHandler("set_promo1", set_promo1_command))
     app.add_handler(CommandHandler("set_promo2", set_promo2_command))
     app.add_handler(CommandHandler("view_promos", view_promos_command))
     app.add_handler(CommandHandler("clear_promo1", clear_promo1_command))
     app.add_handler(CommandHandler("clear_promo2", clear_promo2_command))
-    
+
+    # Auto-post commands
     app.add_handler(CommandHandler("enable_autopost", enable_autopost))
     app.add_handler(CommandHandler("disable_autopost", disable_autopost))
     app.add_handler(CommandHandler("autopost_status", autopost_status))
+
+    # Analytics commands
     app.add_handler(CommandHandler("export_users", export_users_report))
     app.add_handler(CommandHandler("user_stats", user_stats_command))
     app.add_handler(CommandHandler("import_users", import_users_to_channel))
-    app.add_handler(
-        CommandHandler("view_unauthorized", view_unauthorized_attempts))
-    app.add_handler(
-        CommandHandler("clear_unauthorized", clear_unauthorized_log))
+
+    # Activity commands
     app.add_handler(CommandHandler("recent_activity", view_recent_activity))
     app.add_handler(CommandHandler("clear_activity", clear_recent_activity))
-    app.add_handler(CommandHandler("send_to_channel", send_to_channel))
-    app.add_handler(CommandHandler("clear_channel_media", clear_channel_media))
-    app.add_handler(CommandHandler("cancel", cancel_command))
-    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("view_unauthorized", view_unauthorized_attempts))
+    app.add_handler(CommandHandler("clear_unauthorized", clear_unauthorized_log))
 
     # Callback handlers
-    app.add_handler(
-        CallbackQueryHandler(enter_code_callback, pattern="^enter_code_"))
-    app.add_handler(
-        CallbackQueryHandler(resend_code_callback, pattern="^resend_code_"))
+    app.add_handler(CallbackQueryHandler(enter_code_callback, pattern="^enter_code_"))
+    app.add_handler(CallbackQueryHandler(resend_code_callback, pattern="^resend_code_"))
     app.add_handler(CallbackQueryHandler(post_callback, pattern="^post_"))
 
-    # Message handlers
-    app.add_handler(
-        MessageHandler(filters.FORWARDED & ~filters.COMMAND,
-                       handle_forwarded_message))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_bulk_file))
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_content))
-    app.add_handler(
-        MessageHandler(filters.PHOTO | filters.VIDEO, handle_content))
+    # Message handlers - ORDER MATTERS!
+    app.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND, handle_forwarded_message))
+
+    # Document handler for links TXT files
+    app.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND, handle_bulk_file))
+
+    # Combined media handler (photos + videos)
+    app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & ~filters.COMMAND, handle_media_upload))
+
+    # Text handler (for links and other text)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_content))
 
     # Join request handler - THE KEY COMPONENT
     app.add_handler(ChatJoinRequestHandler(handle_join_request))
@@ -2173,25 +2933,24 @@ def main():
     for channel_id, enabled in AUTO_POST_ENABLED.items():
         if enabled:
             try:
-                # Start immediately (will then schedule next post randomly)
+                # Start with small random delay
+                delay = random.randint(1, 5)
                 scheduler.add_job(auto_post_job,
                                   'date',
-                                  run_date=datetime.now(),
+                                  run_date=datetime.now() + timedelta(minutes=delay),
                                   args=[app.bot, channel_id],
                                   id=f'autopost_{channel_id}',
                                   replace_existing=True)
-                logger.info(f"✅ Auto-post restored for {channel_id}")
+                logger.info(f"✅ Auto-post restored for {channel_id} (starting in {delay} min)")
             except Exception as e:
                 logger.error(f"Failed to restore: {e}")
 
     logger.info(f"✅ Bot running - Owner: {ADMIN_ID}")
     logger.info(f"✅ Smart Verification: ENABLED")
-    logger.info(f"✅ Random Intervals: 12-28 minutes")
-    logger.info(f"✅ Random Emojis: {len(CAPTION_EMOJIS)} emojis")
-    logger.info(f"✅ Promo Pattern: 5th=Promo1, 10th=Promo2")
-    logger.info(
-        f"✅ Loaded: {len(MANAGED_CHANNELS)} channels, {len(UPLOADED_IMAGES)} images"
-    )
+    logger.info(f"✅ Fallback Channel: {GLOBAL_FALLBACK_CHANNEL or 'Not set'}")
+    logger.info(f"✅ Loaded: {len(MANAGED_CHANNELS)} channels")
+    logger.info(f"✅ Media Queues: {sum(len(m) for m in CHANNEL_MEDIA_QUEUE.values())} items")
+    logger.info(f"✅ Links: {sum(len(l) for l in CHANNEL_LINKS.values())} items")
 
     # Railway fix: Drop pending updates on restart
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
