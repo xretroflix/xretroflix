@@ -57,6 +57,14 @@ CHANNEL_LINK_INDEX = {}  # {channel_id: current_index}
 # NEW: Channel content type configuration
 CHANNEL_CONTENT_TYPE = {}  # {channel_id: 'media' / 'links'}
 
+# NEW: Custom intervals per channel (optional - defaults to 12-28 mins)
+CHANNEL_INTERVALS = {}  # {channel_id: {'min': minutes, 'max': minutes}}
+DEFAULT_INTERVAL_MIN = 12
+DEFAULT_INTERVAL_MAX = 28
+
+# NEW: Per-channel posting intervals (in minutes)
+CHANNEL_INTERVALS = {}  # {channel_id: {'min': 12, 'max': 28}}
+
 # Emoji rotation for pattern breaking
 CAPTION_EMOJIS = [
     '🎬', '🔥', '⚡', '💎', '✨', '🎯', '🚀', '⭐',
@@ -112,7 +120,8 @@ def save_data():
             'channel_media_queue': CHANNEL_MEDIA_QUEUE,
             'channel_links': CHANNEL_LINKS,
             'channel_link_index': CHANNEL_LINK_INDEX,
-            'channel_content_type': CHANNEL_CONTENT_TYPE
+            'channel_content_type': CHANNEL_CONTENT_TYPE,
+            'channel_intervals': CHANNEL_INTERVALS
         }
         with open(STORAGE_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, default=str)
@@ -128,7 +137,7 @@ def load_data():
     global CURRENT_IMAGE_INDEX, BULK_APPROVAL_MODE, BLOCKED_USERS, USER_DATABASE
     global PROMO_IMAGES, POST_COUNTER
     global GLOBAL_FALLBACK_CHANNEL, CHANNEL_MEDIA_QUEUE, CHANNEL_LINKS
-    global CHANNEL_LINK_INDEX, CHANNEL_CONTENT_TYPE
+    global CHANNEL_LINK_INDEX, CHANNEL_CONTENT_TYPE, CHANNEL_INTERVALS
 
     try:
         if os.path.exists(STORAGE_FILE):
@@ -154,6 +163,7 @@ def load_data():
             CHANNEL_LINKS = data.get('channel_links', {})
             CHANNEL_LINK_INDEX = data.get('channel_link_index', {})
             CHANNEL_CONTENT_TYPE = data.get('channel_content_type', {})
+            CHANNEL_INTERVALS = data.get('channel_intervals', {})
 
             # Convert string keys to int for all dictionaries
             def convert_keys(d):
@@ -174,6 +184,7 @@ def load_data():
             CHANNEL_LINKS = convert_keys(CHANNEL_LINKS)
             CHANNEL_LINK_INDEX = convert_keys(CHANNEL_LINK_INDEX)
             CHANNEL_CONTENT_TYPE = convert_keys(CHANNEL_CONTENT_TYPE)
+            CHANNEL_INTERVALS = convert_keys(CHANNEL_INTERVALS)
 
             logger.info(
                 f"✅ Loaded: {len(MANAGED_CHANNELS)} channels, {len(UPLOADED_IMAGES)} images"
@@ -671,6 +682,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/enable_autopost - Enable\n"
             "/disable_autopost - Disable\n"
             "/autopost_status - Check\n\n"
+
+            "━━━ INTERVALS ━━━\n"
+            "/set_interval - Custom timing\n"
+            "/clear_interval - Reset to default\n"
+            "/view_intervals - View all\n\n"
 
             "━━━ QUICK SEND ━━━\n"
             "/post - Post content\n"
@@ -1419,11 +1435,20 @@ async def view_channel_config_command(update: Update, context: ContextTypes.DEFA
         current_idx = CURRENT_IMAGE_INDEX.get(channel_id, 0)
         post_count = POST_COUNTER.get(channel_id, 0)
 
+        # Get interval (custom or default)
+        if channel_id in CHANNEL_INTERVALS:
+            interval_min = CHANNEL_INTERVALS[channel_id]['min']
+            interval_max = CHANNEL_INTERVALS[channel_id]['max']
+            interval_str = f"{interval_min}-{interval_max} mins (custom)"
+        else:
+            interval_str = f"{DEFAULT_INTERVAL_MIN}-{DEFAULT_INTERVAL_MAX} mins (default)"
+
         text += f"📢 *{data['name']}*\n"
         text += f"   ID: `{channel_id}`\n"
         text += f"   Type: {content_type}\n"
         text += f"   Approval: {'🔄 Bulk' if bulk_mode else '🛡️ Smart'}\n"
         text += f"   Auto-Post: {'✅ ON' if auto_post else '❌ OFF'}\n"
+        text += f"   ⏰ Interval: {interval_str}\n"
         text += f"   Media Queue: {media_count}\n"
         text += f"   Links: {links_count}\n"
         text += f"   Old Images: {old_images}\n"
@@ -1431,6 +1456,125 @@ async def view_channel_config_command(update: Update, context: ContextTypes.DEFA
         text += f"   Posts Made: {post_count}\n\n"
 
     text += f"\n🌐 Fallback Channel: {GLOBAL_FALLBACK_CHANNEL or 'Not set'}"
+    text += f"\n⏰ Default Interval: {DEFAULT_INTERVAL_MIN}-{DEFAULT_INTERVAL_MAX} mins"
+
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+# ========== INTERVAL COMMANDS ==========
+async def set_interval_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set custom posting interval for a channel"""
+    if await ignore_non_admin(update, context):
+        return
+
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: `/set_interval CHANNEL_ID MIN_MINS MAX_MINS`\n\n"
+            "Examples:\n"
+            "• `/set_interval -100123 90 150` → 1.5-2.5 hours\n"
+            "• `/set_interval -100123 120 180` → 2-3 hours\n"
+            "• `/set_interval -100123 30 60` → 30-60 mins\n\n"
+            f"Default: {DEFAULT_INTERVAL_MIN}-{DEFAULT_INTERVAL_MAX} mins",
+            parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+        min_mins = int(context.args[1])
+        max_mins = int(context.args[2])
+
+        if channel_id not in MANAGED_CHANNELS:
+            await update.message.reply_text("❌ Channel not managed")
+            return
+
+        if min_mins < 1:
+            await update.message.reply_text("❌ Minimum interval must be at least 1 minute")
+            return
+
+        if max_mins < min_mins:
+            await update.message.reply_text("❌ Maximum must be greater than minimum")
+            return
+
+        if max_mins > 1440:  # 24 hours
+            await update.message.reply_text("❌ Maximum interval cannot exceed 1440 minutes (24 hours)")
+            return
+
+        CHANNEL_INTERVALS[channel_id] = {
+            'min': min_mins,
+            'max': max_mins
+        }
+        save_data()
+
+        # Convert to hours for display
+        min_hours = min_mins / 60
+        max_hours = max_mins / 60
+
+        await update.message.reply_text(
+            f"✅ Interval set for {MANAGED_CHANNELS[channel_id]['name']}!\n\n"
+            f"⏰ New Interval: {min_mins}-{max_mins} minutes\n"
+            f"📊 Approx: {min_hours:.1f}-{max_hours:.1f} hours\n\n"
+            f"Posts will occur randomly within this range.",
+            parse_mode='Markdown')
+
+        logger.info(f"✅ Set interval for {channel_id}: {min_mins}-{max_mins} mins")
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid numbers. Use: `/set_interval CHANNEL_ID MIN MAX`")
+
+
+async def clear_interval_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear custom interval (revert to default)"""
+    if await ignore_non_admin(update, context):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/clear_interval CHANNEL_ID`\n\n"
+            f"This reverts to default: {DEFAULT_INTERVAL_MIN}-{DEFAULT_INTERVAL_MAX} mins",
+            parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+
+        if channel_id in CHANNEL_INTERVALS:
+            del CHANNEL_INTERVALS[channel_id]
+            save_data()
+            await update.message.reply_text(
+                f"✅ Interval cleared!\n\n"
+                f"Channel: {MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')}\n"
+                f"Now using default: {DEFAULT_INTERVAL_MIN}-{DEFAULT_INTERVAL_MAX} mins")
+        else:
+            await update.message.reply_text("❌ No custom interval set for this channel")
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID")
+
+
+async def view_intervals_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View all channel intervals"""
+    if await ignore_non_admin(update, context):
+        return
+
+    text = "⏰ *Channel Posting Intervals*\n\n"
+    text += f"Default: {DEFAULT_INTERVAL_MIN}-{DEFAULT_INTERVAL_MAX} mins\n\n"
+
+    if not MANAGED_CHANNELS:
+        text += "No channels configured"
+        await update.message.reply_text(text, parse_mode='Markdown')
+        return
+
+    for channel_id, data in MANAGED_CHANNELS.items():
+        if channel_id in CHANNEL_INTERVALS:
+            mins = CHANNEL_INTERVALS[channel_id]
+            interval_str = f"⚙️ {mins['min']}-{mins['max']} mins (custom)"
+        else:
+            interval_str = f"📌 {DEFAULT_INTERVAL_MIN}-{DEFAULT_INTERVAL_MAX} mins (default)"
+
+        auto_status = "✅" if AUTO_POST_ENABLED.get(channel_id, False) else "❌"
+
+        text += f"{auto_status} {data['name']}\n"
+        text += f"   {interval_str}\n\n"
 
     await update.message.reply_text(text, parse_mode='Markdown')
 
@@ -1923,6 +2067,14 @@ async def autopost_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             has_promo1 = channel_id in PROMO_IMAGES and 'promo1' in PROMO_IMAGES[channel_id]
             has_promo2 = channel_id in PROMO_IMAGES and 'promo2' in PROMO_IMAGES[channel_id]
 
+            # Get interval (custom or default)
+            if channel_id in CHANNEL_INTERVALS:
+                interval_min = CHANNEL_INTERVALS[channel_id]['min']
+                interval_max = CHANNEL_INTERVALS[channel_id]['max']
+                interval_str = f"{interval_min}-{interval_max} mins (custom)"
+            else:
+                interval_str = f"{DEFAULT_INTERVAL_MIN}-{DEFAULT_INTERVAL_MAX} mins (default)"
+
             # Count content
             if content_type == 'links':
                 content_count = len(CHANNEL_LINKS.get(channel_id, []))
@@ -1938,7 +2090,7 @@ async def autopost_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"   Content: {content_count}\n"
             text += f"   Posts Made: {post_count}\n"
             text += f"   Current Index: {current_idx}\n"
-            text += f"   Interval: 12-28 mins (random)\n"
+            text += f"   ⏰ Interval: {interval_str}\n"
             text += f"   Promo 1: {'✅' if has_promo1 else '❌'}\n"
             text += f"   Promo 2: {'✅' if has_promo2 else '❌'}\n\n"
 
@@ -2134,8 +2286,15 @@ async def auto_post_job(bot, channel_id: int):
 
         save_data()
 
-        # Schedule next post with random interval
-        next_delay_minutes = random.randint(12, 28)
+        # Schedule next post with interval (custom or default)
+        if channel_id in CHANNEL_INTERVALS:
+            interval_min = CHANNEL_INTERVALS[channel_id]['min']
+            interval_max = CHANNEL_INTERVALS[channel_id]['max']
+        else:
+            interval_min = DEFAULT_INTERVAL_MIN
+            interval_max = DEFAULT_INTERVAL_MAX
+
+        next_delay_minutes = random.randint(interval_min, interval_max)
         next_run_time = datetime.now() + timedelta(minutes=next_delay_minutes)
 
         scheduler.add_job(
@@ -2146,7 +2305,7 @@ async def auto_post_job(bot, channel_id: int):
             id=f'autopost_{channel_id}',
             replace_existing=True)
 
-        logger.info(f"⏰ Next post in {next_delay_minutes} minutes")
+        logger.info(f"⏰ Next post in {next_delay_minutes} minutes (interval: {interval_min}-{interval_max})")
 
     except Exception as e:
         logger.error(f"❌ Auto-post failed for channel {channel_id}: {e}")
@@ -2861,6 +3020,11 @@ def main():
     # NEW: Channel config commands
     app.add_handler(CommandHandler("set_channel_type", set_channel_type_command))
     app.add_handler(CommandHandler("view_config", view_channel_config_command))
+
+    # NEW: Interval commands
+    app.add_handler(CommandHandler("set_interval", set_interval_command))
+    app.add_handler(CommandHandler("clear_interval", clear_interval_command))
+    app.add_handler(CommandHandler("view_intervals", view_intervals_command))
 
     # Posting commands
     app.add_handler(CommandHandler("post", post_command))
