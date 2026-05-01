@@ -8,10 +8,7 @@ import asyncio
 import json
 from io import BytesIO
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ChatJoinRequestHandler, ContextTypes, filters, ChatMemberHandler
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ChatJoinRequestHandler, ContextTypes, filters
 from telegram.constants import ChatMemberStatus
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -44,51 +41,29 @@ AUTO_POST_ENABLED = {}
 POSTING_INTERVAL_HOURS = 1
 
 # Promo image storage
-PROMO_IMAGES = {}
-POST_COUNTER = {}
+PROMO_IMAGES = {}  # {channel_id: {'promo1': {...}, 'promo2': {...}}}
+POST_COUNTER = {}  # {channel_id: count} - tracks total posts for promo pattern
 
-# Global fallback channel for rejected users
-GLOBAL_FALLBACK_CHANNEL = ""
+# NEW: Global fallback channel for rejected users
+GLOBAL_FALLBACK_CHANNEL = ""  # Set via /set_fallback command
 
-# Combined media storage (images + videos in upload order)
-CHANNEL_MEDIA_QUEUE = {}
+# NEW: Combined media storage (images + videos in upload order)
+CHANNEL_MEDIA_QUEUE = {}  # {channel_id: [{'type': 'photo'/'video', 'file_id': '...', 'caption': '...'}]}
 
-# Links storage for link-only channels
-CHANNEL_LINKS = {}
-CHANNEL_LINK_INDEX = {}
+# NEW: Links storage for link-only channels
+CHANNEL_LINKS = {}  # {channel_id: ['link1', 'link2', ...]}
+CHANNEL_LINK_INDEX = {}  # {channel_id: current_index}
 
-# Channel content type configuration
-CHANNEL_CONTENT_TYPE = {}
+# NEW: Channel content type configuration
+CHANNEL_CONTENT_TYPE = {}  # {channel_id: 'media' / 'links'}
 
-# Custom intervals per channel
-CHANNEL_INTERVALS = {}
+# NEW: Custom intervals per channel (optional - defaults to 12-28 mins)
+CHANNEL_INTERVALS = {}  # {channel_id: {'min': minutes, 'max': minutes}}
 DEFAULT_INTERVAL_MIN = 12
 DEFAULT_INTERVAL_MAX = 28
 
-# Global media pool — single shared pool of images+videos (no channel binding)
-# Useful when same content should be sendable to ANY channel.
-# Each entry: {'type': 'photo'|'video', 'file_id': str, 'caption': str}
-GLOBAL_MEDIA_POOL = []
-
-# ─── SAFETY LIMITS ────────────────────────────────────────────────────────
-# Telegram's published limits: 30 msgs/sec total, 20 msgs/min per chat.
-# These are CONSERVATIVE defaults that stay well below any threshold
-# Telegram is likely to flag. Adjust via /set_safety_limits if you really
-# need to push higher — but lower is always safer.
-DAILY_LIMIT_PER_CHANNEL    = 50       # default daily cap per channel
-GLOBAL_DAILY_LIMIT         = 500      # max messages across ALL channels per 24h
-MIN_GAP_BETWEEN_SENDS_SEC  = 8        # global min gap (any two sends in the system)
-MAX_GAP_BETWEEN_SENDS_SEC  = 25       # global max gap
-PER_CHANNEL_COOLDOWN_SEC   = 90       # default cooldown between two sends to same channel
-
-# Per-channel daily caps that override DAILY_LIMIT_PER_CHANNEL when set
-# Shape: {channel_id: int}
-CHANNEL_DAILY_LIMITS = {}
-# Per-day counter of sends, so we can enforce DAILY_LIMIT_PER_CHANNEL
-# Shape: {'2026-04-29': {channel_id: int, ...}, ...}
-SEND_COUNTERS_BY_DAY = {}
-# Last-send timestamp per channel, used for PER_CHANNEL_COOLDOWN_SEC
-LAST_SEND_TS = {}
+# NEW: Per-channel posting intervals (in minutes)
+CHANNEL_INTERVALS = {}  # {channel_id: {'min': 12, 'max': 28}}
 
 # Emoji rotation for pattern breaking
 CAPTION_EMOJIS = [
@@ -99,7 +74,7 @@ CAPTION_EMOJIS = [
 
 USER_DATABASE = {}
 USER_ACTIVITY_LOG = []
-RECENT_ACTIVITY = []
+RECENT_ACTIVITY = []  # Store recent approvals/rejections for batch viewing
 
 DEFAULT_CAPTION = ""
 CHANNEL_DEFAULT_CAPTIONS = {}
@@ -111,7 +86,7 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 
-# Permanent storage
+# Permanent storage - Railway fix: create directory if needed
 STORAGE_DIR = "/app/data"
 if not os.path.exists(STORAGE_DIR):
     try:
@@ -122,73 +97,6 @@ if not os.path.exists(STORAGE_DIR):
         STORAGE_DIR = "."
 
 STORAGE_FILE = os.path.join(STORAGE_DIR, "bot_data.json")
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# SUPABASE TELEMETRY (additive — bot stays fully functional even if
-# Supabase env vars are missing or the service is unreachable)
-# ═══════════════════════════════════════════════════════════════════════
-SUPABASE_URL         = os.environ.get('SUPABASE_URL', '').strip()
-SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '').strip()
-_supabase_client = None
-_supabase_ready  = False
-
-
-def _init_supabase():
-    """Initialize Supabase client once at startup. Never raises."""
-    global _supabase_client, _supabase_ready
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        logger.warning("⚠️  Supabase env vars not set — telemetry disabled (bot still works)")
-        return
-    try:
-        from supabase import create_client
-        _supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-        _supabase_ready = True
-        logger.info("✅ Supabase telemetry initialized")
-    except ImportError:
-        logger.warning("⚠️  supabase package not installed — pip install supabase")
-    except Exception as e:
-        logger.error(f"⚠️  Supabase init failed (telemetry disabled, bot still works): {e}")
-
-
-def _log_event_sync(user_id, channel_id, event_type, **kwargs):
-    """Synchronous write to channel_events. Wrapped — never raises."""
-    if not _supabase_ready:
-        return
-    try:
-        user_info    = (USER_DATABASE.get(user_id) or {}) if user_id else {}
-        channel_info = (MANAGED_CHANNELS.get(channel_id) or {}) if channel_id else {}
-
-        row = {
-            'telegram_user_id'  : int(user_id) if user_id else None,
-            'telegram_username' : kwargs.get('username')   or user_info.get('username')   or None,
-            'first_name'        : kwargs.get('first_name') or user_info.get('first_name') or None,
-            'last_name'         : kwargs.get('last_name')  or user_info.get('last_name')  or None,
-            'channel_id'        : int(channel_id) if channel_id else None,
-            'channel_name'      : channel_info.get('name'),
-            'event_type'        : event_type,
-            'reason'            : kwargs.get('reason'),
-            'score'             : kwargs.get('score'),
-            'captcha_question'  : kwargs.get('captcha_question'),
-            'fallback_sent'     : kwargs.get('fallback_sent'),
-            'metadata'          : kwargs.get('metadata'),
-        }
-        row = {k: v for k, v in row.items() if v is not None}
-
-        _supabase_client.table('channel_events').insert(row).execute()
-    except Exception as e:
-        logger.warning(f"Supabase log failed (non-fatal): {e}")
-
-
-async def log_event(user_id, channel_id, event_type, **kwargs):
-    """Async-safe event logger. Call from any handler."""
-    try:
-        await asyncio.to_thread(
-            _log_event_sync, user_id, channel_id, event_type, **kwargs
-        )
-    except Exception as e:
-        logger.warning(f"log_event failed (non-fatal): {e}")
-# ═══════════════════════════════════════════════════════════════════════
 
 
 def save_data():
@@ -207,20 +115,13 @@ def save_data():
             'user_database': USER_DATABASE,
             'promo_images': PROMO_IMAGES,
             'post_counter': POST_COUNTER,
+            # NEW additions
             'global_fallback_channel': GLOBAL_FALLBACK_CHANNEL,
             'channel_media_queue': CHANNEL_MEDIA_QUEUE,
             'channel_links': CHANNEL_LINKS,
             'channel_link_index': CHANNEL_LINK_INDEX,
             'channel_content_type': CHANNEL_CONTENT_TYPE,
-            'channel_intervals': CHANNEL_INTERVALS,
-            'global_media_pool': GLOBAL_MEDIA_POOL,
-            'send_counters_by_day': SEND_COUNTERS_BY_DAY,
-            'safety_daily_per_channel': DAILY_LIMIT_PER_CHANNEL,
-            'safety_daily_global': GLOBAL_DAILY_LIMIT,
-            'safety_min_gap': MIN_GAP_BETWEEN_SENDS_SEC,
-            'safety_max_gap': MAX_GAP_BETWEEN_SENDS_SEC,
-            'safety_channel_cooldown': PER_CHANNEL_COOLDOWN_SEC,
-            'channel_daily_limits': CHANNEL_DAILY_LIMITS
+            'channel_intervals': CHANNEL_INTERVALS
         }
         with open(STORAGE_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, default=str)
@@ -237,10 +138,6 @@ def load_data():
     global PROMO_IMAGES, POST_COUNTER
     global GLOBAL_FALLBACK_CHANNEL, CHANNEL_MEDIA_QUEUE, CHANNEL_LINKS
     global CHANNEL_LINK_INDEX, CHANNEL_CONTENT_TYPE, CHANNEL_INTERVALS
-    global GLOBAL_MEDIA_POOL, SEND_COUNTERS_BY_DAY
-    global DAILY_LIMIT_PER_CHANNEL, GLOBAL_DAILY_LIMIT
-    global MIN_GAP_BETWEEN_SENDS_SEC, MAX_GAP_BETWEEN_SENDS_SEC
-    global PER_CHANNEL_COOLDOWN_SEC, CHANNEL_DAILY_LIMITS
 
     try:
         if os.path.exists(STORAGE_FILE):
@@ -260,26 +157,15 @@ def load_data():
             PROMO_IMAGES = data.get('promo_images', {})
             POST_COUNTER = data.get('post_counter', {})
 
+            # NEW additions
             GLOBAL_FALLBACK_CHANNEL = data.get('global_fallback_channel', "")
             CHANNEL_MEDIA_QUEUE = data.get('channel_media_queue', {})
             CHANNEL_LINKS = data.get('channel_links', {})
             CHANNEL_LINK_INDEX = data.get('channel_link_index', {})
             CHANNEL_CONTENT_TYPE = data.get('channel_content_type', {})
             CHANNEL_INTERVALS = data.get('channel_intervals', {})
-            GLOBAL_MEDIA_POOL = data.get('global_media_pool', [])
-            SEND_COUNTERS_BY_DAY = data.get('send_counters_by_day', {})
-            DAILY_LIMIT_PER_CHANNEL    = data.get('safety_daily_per_channel', DAILY_LIMIT_PER_CHANNEL)
-            GLOBAL_DAILY_LIMIT         = data.get('safety_daily_global', GLOBAL_DAILY_LIMIT)
-            MIN_GAP_BETWEEN_SENDS_SEC  = data.get('safety_min_gap', MIN_GAP_BETWEEN_SENDS_SEC)
-            MAX_GAP_BETWEEN_SENDS_SEC  = data.get('safety_max_gap', MAX_GAP_BETWEEN_SENDS_SEC)
-            PER_CHANNEL_COOLDOWN_SEC   = data.get('safety_channel_cooldown', PER_CHANNEL_COOLDOWN_SEC)
-            CHANNEL_DAILY_LIMITS       = data.get('channel_daily_limits', {})
-            # Convert string keys to int (Supabase / JSON stringifies them)
-            CHANNEL_DAILY_LIMITS = {
-                int(k) if str(k).lstrip('-').isdigit() else k: v
-                for k, v in CHANNEL_DAILY_LIMITS.items()
-            }
 
+            # Convert string keys to int for all dictionaries
             def convert_keys(d):
                 return {
                     int(k) if str(k).lstrip('-').isdigit() else k: v
@@ -333,15 +219,17 @@ def is_name_suspicious(name: str) -> bool:
     if not name or len(name) < 2:
         return True
 
+    # Check for "User" followed by numbers (typical bot pattern)
     if re.match(r'^User\d+$', name, re.IGNORECASE):
         return True
 
+    # Check if name is mostly numbers
     letters_and_numbers = re.sub(r'[^a-zA-Z0-9]', '', name)
     if len(letters_and_numbers) < 2:
         return True
 
     numbers = re.sub(r'\D', '', name)
-    if len(numbers) > len(name) * 0.6:
+    if len(numbers) > len(name) * 0.6:  # More than 60% numbers
         return True
 
     return False
@@ -349,26 +237,33 @@ def is_name_suspicious(name: str) -> bool:
 
 async def check_user_legitimacy(context: ContextTypes.DEFAULT_TYPE,
                                 user_id: int) -> dict:
-    """Enhanced user legitimacy checker with detailed scoring"""
+    """
+    Enhanced user legitimacy checker with detailed scoring
+    Returns: {"legitimate": bool, "score": int, "reason": str}
+    """
     try:
         user = await context.bot.get_chat(user_id)
 
         score = 0
         reasons = []
 
+        # Check 1: Is it a bot?
         if user.type == "bot":
             return {"legitimate": False, "reason": "Bot account", "score": 0}
 
+        # Check 2: Name quality (40 points)
         if not user.first_name or is_name_suspicious(user.first_name):
             reasons.append("Suspicious name")
         else:
             score += 40
 
+        # Check 3: Has username? (30 points)
         if user.username:
             score += 30
         else:
             reasons.append("No username")
 
+        # Check 4: Has profile photo? (30 points)
         if REQUIRE_PROFILE_PHOTO:
             try:
                 photos = await context.bot.get_user_profile_photos(user_id, limit=1)
@@ -379,7 +274,13 @@ async def check_user_legitimacy(context: ContextTypes.DEFAULT_TYPE,
             except:
                 reasons.append("Cannot check photo")
         else:
+            # Give score anyway if not required
             score += 30
+
+        # Scoring system:
+        # 100 = Legitimate (auto-approve)
+        # 1-99 = Borderline (manual check with captcha)
+        # 0 = Suspicious (auto-reject)
 
         if score >= 70:
             return {"legitimate": True, "score": 100}
@@ -402,8 +303,8 @@ def track_user_activity(user_id: int,
         USER_DATABASE[user_id] = {
             'first_name':
             user_data.get('first_name', 'Unknown') if user_data else 'Unknown',
-            'last_name': user_data.get('last_name', '') if user_data else '',
-            'username': user_data.get('username', '') if user_data else '',
+            'last_name': user_data.get('last_name', ''),
+            'username': user_data.get('username', ''),
             'channels': {}
         }
     if channel_id not in USER_DATABASE[user_id]['channels']:
@@ -471,23 +372,28 @@ async def owner_only_check(update: Update,
 
 
 async def is_admin(update: Update) -> bool:
-    """Quick check if user is admin"""
+    """Quick check if user is admin - for complete lockdown"""
     if not update.effective_user:
         return False
     return update.effective_user.id == ADMIN_ID
 
 
 async def ignore_non_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Complete lockdown - ignore ALL non-admin interactions silently."""
+    """
+    Complete lockdown - ignore ALL non-admin interactions silently.
+    Returns True if should ignore (non-admin), False if admin.
+    """
     if not update.effective_user:
-        return True
+        return True  # Ignore
 
     if update.effective_user.id != ADMIN_ID:
+        # Complete silence - no response, no logging for regular attempts
+        # Only log if they try commands (potential probe)
         if update.message and update.message.text and update.message.text.startswith('/'):
             logger.warning(f"🚫 Blocked command attempt from {update.effective_user.id}")
-        return True
+        return True  # Ignore
 
-    return False
+    return False  # Admin - proceed
 
 
 # ========== SMART JOIN REQUEST HANDLER ==========
@@ -503,24 +409,23 @@ async def handle_join_request(update: Update,
     user = request.from_user
     chat_id = request.chat.id
 
+    # Only handle managed channels
     if chat_id not in MANAGED_CHANNELS:
         return
 
+    # Always approve admin
     if user.id == ADMIN_ID:
         await request.approve()
         logger.info(f"✅ Admin auto-approved: {user.id}")
         return
 
+    # Block already blocked users
     if user.id in BLOCKED_USERS:
         await request.decline()
         logger.info(f"❌ Blocked user {user.id} tried to join")
         return
 
-    # ─── HOOK: Log every join request immediately ───
-    await log_event(user.id, chat_id, 'join_requested',
-                    username=user.username, first_name=user.first_name,
-                    last_name=user.last_name)
-
+    # Check if bulk approval is enabled for this channel
     if BULK_APPROVAL_MODE.get(chat_id, False):
         await request.approve()
         track_user_activity(user.id, chat_id, 'approved', {
@@ -528,12 +433,10 @@ async def handle_join_request(update: Update,
             'last_name': user.last_name or '',
             'username': user.username or ''
         })
-        # ─── HOOK: Bulk-approve event ───
-        await log_event(user.id, chat_id, 'bulk_approved',
-                        username=user.username, first_name=user.first_name)
         logger.info(f"✅ Bulk-approved user: {user.id}")
         return
 
+    # Smart verification - check legitimacy
     legitimacy = await check_user_legitimacy(context, user.id)
 
     # === TIER 1: AUTO-APPROVE LEGITIMATE USERS ===
@@ -546,6 +449,7 @@ async def handle_join_request(update: Update,
                 'username': user.username or ''
             })
 
+            # Log to recent activity instead of sending notification
             RECENT_ACTIVITY.append({
                 'type': 'auto_approved',
                 'user_id': user.id,
@@ -555,11 +459,6 @@ async def handle_join_request(update: Update,
                 'channel_id': chat_id,
                 'timestamp': datetime.now()
             })
-
-            # ─── HOOK: Auto-approve event ───
-            await log_event(user.id, chat_id, 'auto_approved',
-                            username=user.username, first_name=user.first_name,
-                            score=legitimacy['score'])
 
             logger.info(f"✅ Auto-approved legitimate user: {user.id}")
             return
@@ -571,6 +470,7 @@ async def handle_join_request(update: Update,
         try:
             await request.decline()
 
+            # NEW: Send fallback channel link to rejected user
             if GLOBAL_FALLBACK_CHANNEL:
                 try:
                     await context.bot.send_message(
@@ -582,8 +482,10 @@ async def handle_join_request(update: Update,
                     )
                     logger.info(f"📤 Sent fallback channel to rejected user {user.id}")
                 except Exception as dm_error:
+                    # User might have blocked bot or never started it
                     logger.warning(f"Could not DM user {user.id}: {dm_error}")
 
+            # Log to recent activity
             RECENT_ACTIVITY.append({
                 'type': 'auto_rejected',
                 'user_id': user.id,
@@ -596,29 +498,24 @@ async def handle_join_request(update: Update,
                 'timestamp': datetime.now()
             })
 
-            # ─── HOOK: Auto-reject event ───
-            await log_event(user.id, chat_id, 'auto_rejected',
-                            username=user.username, first_name=user.first_name,
-                            score=legitimacy['score'],
-                            reason=legitimacy.get('reason'),
-                            fallback_sent=bool(GLOBAL_FALLBACK_CHANNEL))
-
             logger.info(f"❌ Auto-rejected suspicious user: {user.id}")
             return
         except Exception as e:
             logger.error(f"Auto-rejection failed: {e}")
 
     # === TIER 3: MATH CAPTCHA FOR BORDERLINE CASES ===
+    # Generate simple math problem
     num1 = random.randint(1, 10)
     num2 = random.randint(1, 10)
     answer = num1 + num2
 
+    # Store verification data
     PENDING_VERIFICATIONS[user.id] = {
         'code': str(answer),
         'chat_id': chat_id,
         'timestamp': datetime.now(),
         'captcha_question': f"{num1} + {num2}",
-        'request': request
+        'request': request  # Store request object for later approval
     }
 
     track_user_activity(user.id, chat_id, 'pending', {
@@ -627,6 +524,7 @@ async def handle_join_request(update: Update,
         'username': user.username or ''
     })
 
+    # Send captcha to admin with quick approve button
     user_link = f"tg://user?id={user.id}"
     keyboard = [[
         InlineKeyboardButton("✅ Approve",
@@ -647,67 +545,7 @@ async def handle_join_request(update: Update,
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # ─── HOOK: Captcha served event ───
-    await log_event(user.id, chat_id, 'captcha_served',
-                    username=user.username, first_name=user.first_name,
-                    score=legitimacy['score'],
-                    reason=legitimacy.get('reason'),
-                    captcha_question=f"{num1} + {num2}")
-
     logger.info(f"⚠️ Sent verification request for user: {user.id}")
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# CHAT-MEMBER HANDLER — tracks when users actually JOIN or LEAVE
-# (fires whenever a user's membership status changes in any managed channel)
-# ═══════════════════════════════════════════════════════════════════════
-async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Tracks the membership-state transitions:
-      • Outside → Inside  → 'joined'   (new member or returning user)
-      • Inside  → Left    → 'left'     (voluntary)
-      • Anything → Kicked → 'kicked'   (banned/removed by admin)
-    """
-    member_update = update.chat_member
-    if not member_update:
-        return
-
-    chat_id = member_update.chat.id
-    if chat_id not in MANAGED_CHANNELS:
-        return
-
-    user = member_update.new_chat_member.user
-    if user.is_bot:
-        return
-
-    old_status = member_update.old_chat_member.status
-    new_status = member_update.new_chat_member.status
-
-    JOINED_STATUSES = ('member', 'restricted', 'administrator', 'creator')
-    LEFT_STATUSES   = ('left', 'kicked')
-
-    event_type = None
-    if old_status in LEFT_STATUSES and new_status in JOINED_STATUSES:
-        event_type = 'joined'
-    elif old_status in JOINED_STATUSES and new_status == 'left':
-        event_type = 'left'
-    elif new_status == 'kicked':
-        event_type = 'kicked'
-
-    if not event_type:
-        return
-
-    await log_event(
-        user.id,
-        chat_id,
-        event_type,
-        username=user.username,
-        first_name=user.first_name,
-        last_name=user.last_name or None,
-        metadata={'old_status': old_status, 'new_status': new_status}
-    )
-    logger.info(f"📊 chat_member: {event_type} — user {user.id} ({user.first_name}) in channel {chat_id}")
-# ═══════════════════════════════════════════════════════════════════════
 
 
 async def enter_code_callback(update: Update,
@@ -731,19 +569,20 @@ async def enter_code_callback(update: Update,
     chat_id = verification['chat_id']
 
     try:
+        # Approve the join request
         request = verification.get('request')
         if request:
             await request.approve()
         else:
+            # Fallback: Try to approve via invite link
             logger.warning(f"No request object found for user {user_id}")
 
+        # Track approval
         track_user_activity(user_id, chat_id, 'approved', {
             'first_name': USER_DATABASE.get(user_id, {}).get('first_name', 'Unknown')
         })
 
-        # ─── HOOK: Captcha approved (admin tapped Approve button) ───
-        await log_event(user_id, chat_id, 'captcha_approved')
-
+        # Remove from pending
         del PENDING_VERIFICATIONS[user_id]
 
         await query.edit_message_text(
@@ -821,18 +660,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/list_media - View media\n"
             "/clear_media - Clear media\n\n"
 
-            "━━━ GLOBAL MEDIA POOL ━━━\n"
-            "/upload_global_media - No channel ID\n"
-            "/done_global_media - Finish upload\n"
-            "/list_global_media - View pool\n"
-            "/clear_global_media - Clear pool\n"
-            "/send_global_to - Push to channels\n\n"
-
-            "━━━ SAFETY LIMITS ━━━\n"
-            "/safety_status - Today's send counts\n"
-            "/set_safety_limits - Adjust caps\n"
-            "/set_channel_daily - Per-ch daily cap\n\n"
-
             "━━━ LINKS UPLOAD ━━━\n"
             "/upload_links - Upload links\n"
             "/done_links - Finish links\n"
@@ -899,6 +726,7 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"📢 Attempting to add channel: {channel_name} ({channel_id})")
 
+        # Check if bot is admin
         is_admin = await is_bot_admin(context, channel_id)
         logger.info(f"🔍 Bot admin check for {channel_id}: {is_admin}")
 
@@ -946,6 +774,7 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             channel_name = MANAGED_CHANNELS[channel_id]['name']
             del MANAGED_CHANNELS[channel_id]
 
+            # Clean up related data
             if channel_id in AUTO_POST_ENABLED:
                 del AUTO_POST_ENABLED[channel_id]
             if channel_id in CHANNEL_MEDIA_QUEUE:
@@ -955,6 +784,7 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if channel_id in CHANNEL_CONTENT_TYPE:
                 del CHANNEL_CONTENT_TYPE[channel_id]
 
+            # Remove scheduler job
             try:
                 scheduler.remove_job(f'autopost_{channel_id}')
             except:
@@ -1047,10 +877,6 @@ async def manual_approve_user(update: Update,
         if request:
             await request.approve()
             track_user_activity(user_id, chat_id, 'approved')
-
-            # ─── HOOK: Manual approve via /approve_user ───
-            await log_event(user_id, chat_id, 'manual_approved')
-
             del PENDING_VERIFICATIONS[user_id]
 
             await update.message.reply_text(
@@ -1089,7 +915,6 @@ async def approve_all_pending(update: Update,
             if request:
                 await request.approve()
                 track_user_activity(user_id, verification['chat_id'], 'approved')
-                await log_event(user_id, verification['chat_id'], 'manual_approved')
                 del PENDING_VERIFICATIONS[user_id]
                 approved += 1
             else:
@@ -1175,9 +1000,6 @@ async def block_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         BLOCKED_USERS.add(user_id)
         save_data()
 
-        # ─── HOOK: Block event ───
-        await log_event(user_id, None, 'blocked')
-
         await update.message.reply_text(
             f"✅ User blocked!\n\n"
             f"User ID: `{user_id}`\n"
@@ -1207,10 +1029,6 @@ async def unblock_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in BLOCKED_USERS:
             BLOCKED_USERS.remove(user_id)
             save_data()
-
-            # ─── HOOK: Unblock event ───
-            await log_event(user_id, None, 'unblocked')
-
             await update.message.reply_text(
                 f"✅ User unblocked!\n\n"
                 f"User ID: `{user_id}`",
@@ -1256,7 +1074,7 @@ async def verification_settings(update: Update,
 async def set_fallback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set global fallback channel for rejected users"""
     global GLOBAL_FALLBACK_CHANNEL
-
+    
     if await ignore_non_admin(update, context):
         return
 
@@ -1278,7 +1096,7 @@ async def set_fallback_command(update: Update, context: ContextTypes.DEFAULT_TYP
 async def clear_fallback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear fallback channel"""
     global GLOBAL_FALLBACK_CHANNEL
-
+    
     if await ignore_non_admin(update, context):
         return
 
@@ -1295,6 +1113,7 @@ async def upload_media_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if not context.args:
+        # Show channels
         if not MANAGED_CHANNELS:
             await update.message.reply_text("No channels added yet. Use /addchannel first")
             return
@@ -1319,6 +1138,7 @@ async def upload_media_command(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data['media_upload_channel'] = channel_id
         context.user_data['media_upload_mode'] = True
 
+        # Set channel content type to media
         CHANNEL_CONTENT_TYPE[channel_id] = 'media'
         save_data()
 
@@ -1348,6 +1168,7 @@ async def done_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         count = len(CHANNEL_MEDIA_QUEUE.get(channel_id, []))
         channel_name = MANAGED_CHANNELS.get(channel_id, {}).get('name', 'Unknown')
 
+        # Count by type
         images = sum(1 for m in CHANNEL_MEDIA_QUEUE.get(channel_id, []) if m['type'] == 'photo')
         videos = sum(1 for m in CHANNEL_MEDIA_QUEUE.get(channel_id, []) if m['type'] == 'video')
 
@@ -1369,7 +1190,11 @@ async def list_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     text = "📂 *Media Library*\n\n"
+
+    # Old format images
     text += f"Global Images (old): {len(UPLOADED_IMAGES)}\n\n"
+
+    # New format media queues
     text += "━━━ Channel Media Queues ━━━\n\n"
 
     for channel_id, media_list in CHANNEL_MEDIA_QUEUE.items():
@@ -1427,624 +1252,6 @@ async def clear_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Invalid channel ID")
 
 
-# ========== GLOBAL MEDIA POOL COMMANDS ==========
-# A shared pool of images+videos with no channel binding. Upload once, then
-# push to ANY channel (or all channels) on demand. Useful for content that's
-# relevant to multiple channels.
-
-async def upload_global_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start global media upload mode (no channel ID needed)."""
-    if await ignore_non_admin(update, context):
-        return
-
-    context.user_data['global_upload_mode'] = True
-    # Make sure no channel-bound upload mode is active
-    context.user_data['media_upload_mode'] = False
-    context.user_data['media_upload_channel'] = None
-    context.user_data['uploading_mode'] = False
-
-    pool_size = len(GLOBAL_MEDIA_POOL)
-    images = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'photo')
-    videos = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'video')
-
-    await update.message.reply_text(
-        f"🌐 *Global Media Upload Mode*\n\n"
-        f"✅ Send IMAGES and VIDEOS now\n"
-        f"📝 With or without captions\n"
-        f"🔢 Sequence is preserved\n"
-        f"🔇 Silent mode (no per-upload reply)\n\n"
-        f"Current pool: {pool_size} items "
-        f"(📷 {images} images · 🎬 {videos} videos)\n\n"
-        f"Use /done_global_media when finished\n"
-        f"Then /send_global_to to push to channels",
-        parse_mode='Markdown')
-
-
-async def done_global_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Finish global media upload mode."""
-    if await ignore_non_admin(update, context):
-        return
-
-    context.user_data['global_upload_mode'] = False
-
-    pool_size = len(GLOBAL_MEDIA_POOL)
-    images = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'photo')
-    videos = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'video')
-
-    await update.message.reply_text(
-        f"✅ *Global Pool Ready*\n\n"
-        f"Total: {pool_size} items\n"
-        f"📷 Images: {images}\n"
-        f"🎬 Videos: {videos}\n\n"
-        f"Next: `/send_global_to CHANNEL_ID` (or `all`)",
-        parse_mode='Markdown')
-
-
-async def list_global_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show what's in the global pool."""
-    if await ignore_non_admin(update, context):
-        return
-
-    pool_size = len(GLOBAL_MEDIA_POOL)
-    if pool_size == 0:
-        await update.message.reply_text(
-            "🌐 *Global Media Pool*\n\n"
-            "Pool is empty.\n"
-            "Use /upload_global_media to add items.",
-            parse_mode='Markdown')
-        return
-
-    images = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'photo')
-    videos = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'video')
-    with_captions = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('caption'))
-
-    text = (
-        f"🌐 *Global Media Pool*\n\n"
-        f"Total items: {pool_size}\n"
-        f"📷 Images: {images}\n"
-        f"🎬 Videos: {videos}\n"
-        f"✏️ With captions: {with_captions}\n\n"
-        f"*First few entries:*\n"
-    )
-    for i, m in enumerate(GLOBAL_MEDIA_POOL[:5], 1):
-        cap = (m.get('caption') or '').strip()
-        cap_preview = (cap[:30] + '…') if len(cap) > 30 else (cap or '_(no caption)_')
-        text += f"{i}. {m.get('type', '?')} — {cap_preview}\n"
-    if pool_size > 5:
-        text += f"\n... and {pool_size - 5} more\n"
-
-    await update.message.reply_text(text, parse_mode='Markdown')
-
-
-async def clear_global_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Clear the global media pool."""
-    if await ignore_non_admin(update, context):
-        return
-
-    pool_size = len(GLOBAL_MEDIA_POOL)
-    GLOBAL_MEDIA_POOL.clear()
-    save_data()
-
-    await update.message.reply_text(f"✅ Global pool cleared ({pool_size} items removed)")
-
-
-# ─── SAFETY HELPERS ───────────────────────────────────────────────────────
-def _today_key():
-    """Day key in UTC; counters reset at midnight UTC."""
-    return datetime.utcnow().strftime('%Y-%m-%d')
-
-
-def _get_today_counter(channel_id: int) -> int:
-    """How many sends already done today to this channel?"""
-    day = _today_key()
-    return SEND_COUNTERS_BY_DAY.get(day, {}).get(str(channel_id), 0)
-
-
-def _get_today_global_total() -> int:
-    """How many total sends today across ALL channels?"""
-    day = _today_key()
-    return sum(SEND_COUNTERS_BY_DAY.get(day, {}).values())
-
-
-def _bump_counter(channel_id: int):
-    """Record one send for today."""
-    day = _today_key()
-    if day not in SEND_COUNTERS_BY_DAY:
-        # Garbage-collect counters older than 7 days while we're here
-        cutoff = (datetime.utcnow() - timedelta(days=7)).strftime('%Y-%m-%d')
-        for old_day in list(SEND_COUNTERS_BY_DAY.keys()):
-            if old_day < cutoff:
-                del SEND_COUNTERS_BY_DAY[old_day]
-        SEND_COUNTERS_BY_DAY[day] = {}
-    SEND_COUNTERS_BY_DAY[day][str(channel_id)] = (
-        SEND_COUNTERS_BY_DAY[day].get(str(channel_id), 0) + 1
-    )
-
-
-def _channel_daily_cap(channel_id: int) -> int:
-    """Resolve daily cap for a channel — per-channel override OR global default."""
-    return CHANNEL_DAILY_LIMITS.get(channel_id, DAILY_LIMIT_PER_CHANNEL)
-
-
-def _channel_cooldown(channel_id: int) -> float:
-    """
-    Resolve cooldown (seconds) between two posts to a channel.
-    If CHANNEL_INTERVALS has a min/max in MINUTES for this channel, use the MIN
-    as the cooldown floor — that's the channel's own pace setting from
-    /set_interval. Otherwise fall back to global PER_CHANNEL_COOLDOWN_SEC.
-    """
-    if channel_id in CHANNEL_INTERVALS:
-        # Channel-specific interval is in minutes; convert to seconds.
-        # We use min*60 as the floor (don't go faster than the channel's min interval).
-        return CHANNEL_INTERVALS[channel_id]['min'] * 60
-    return PER_CHANNEL_COOLDOWN_SEC
-
-
-def _can_send_to_channel(channel_id: int) -> tuple[bool, str]:
-    """Check daily-quota and cooldown. Returns (allowed, reason_if_not)."""
-    # Per-channel daily quota (channel-specific or default)
-    cap = _channel_daily_cap(channel_id)
-    today_for_channel = _get_today_counter(channel_id)
-    if today_for_channel >= cap:
-        return False, f"daily limit hit ({today_for_channel}/{cap})"
-    # Global daily quota
-    today_global = _get_today_global_total()
-    if today_global >= GLOBAL_DAILY_LIMIT:
-        return False, f"global daily limit hit ({today_global}/{GLOBAL_DAILY_LIMIT})"
-    # Per-channel cooldown — uses channel-specific interval if set
-    cooldown = _channel_cooldown(channel_id)
-    last_ts = LAST_SEND_TS.get(channel_id, 0)
-    elapsed = datetime.utcnow().timestamp() - last_ts
-    if elapsed < cooldown:
-        return False, f"channel cooldown ({int(cooldown - elapsed)}s left)"
-    return True, ""
-
-
-async def _send_one_safe(bot, channel_id: int, media: dict) -> tuple[bool, str]:
-    """
-    Send one media item to one channel with all safety checks.
-    Returns (success, message).
-    """
-    allowed, reason = _can_send_to_channel(channel_id)
-    if not allowed:
-        return False, reason
-
-    try:
-        random_emoji = random.choice(CAPTION_EMOJIS)
-        base_caption = ""
-        if media.get('caption'):
-            base_caption = media['caption']
-        elif channel_id in CHANNEL_DEFAULT_CAPTIONS:
-            base_caption = CHANNEL_DEFAULT_CAPTIONS[channel_id]
-        elif DEFAULT_CAPTION:
-            base_caption = DEFAULT_CAPTION
-        final_caption = f"{random_emoji} {base_caption}" if base_caption else random_emoji
-
-        if media.get('type') == 'video':
-            await bot.send_video(channel_id, media['file_id'], caption=final_caption)
-        else:
-            await bot.send_photo(channel_id, media['file_id'], caption=final_caption)
-
-        # Record the send for quota tracking
-        _bump_counter(channel_id)
-        LAST_SEND_TS[channel_id] = datetime.utcnow().timestamp()
-        return True, "ok"
-
-    except Exception as e:
-        msg = str(e)
-        # If Telegram tells us to back off, honor it
-        if 'flood' in msg.lower() or 'retry after' in msg.lower():
-            logger.warning(f"⚠️  Telegram rate-limit on {channel_id}: {msg}")
-            # Sleep 60s then return failure so caller can decide
-            await asyncio.sleep(60)
-        return False, msg
-
-
-async def send_pool_to_channels_safely(bot, target_channels: list[int],
-                                        progress_chat_id: int = None) -> dict:
-    """
-    CHANNEL-AWARE scheduler. Each channel has its own:
-      • daily cap (CHANNEL_DAILY_LIMITS or default)
-      • interval/cooldown (CHANNEL_INTERVALS or default)
-    Plus global guardrails:
-      • GLOBAL_DAILY_LIMIT — total across all channels
-      • MIN/MAX_GAP_BETWEEN_SENDS_SEC — applies to consecutive sends
-        anywhere in the system (so different channels stagger naturally)
-
-    Algorithm: at each step, look at all channels with items still to send,
-    pick the one that's been waiting longest AND is past its cooldown.
-    If no channel is ready right now, sleep until the earliest one is ready.
-    Adds a small random jitter on top so post times look natural.
-
-    Returns: {success, skipped, failed, reasons, per_channel_sent}
-    """
-    success = 0
-    skipped = 0
-    failed = 0
-    reasons = []
-    per_channel_sent = {cid: 0 for cid in target_channels}
-
-    if not GLOBAL_MEDIA_POOL or not target_channels:
-        return {'success': 0, 'skipped': 0, 'failed': 0, 'reasons': [], 'per_channel_sent': {}}
-
-    # Each channel has its own queue of items to send (a copy of the pool,
-    # shuffled per-channel so order differs across channels)
-    channel_queues = {}
-    for cid in target_channels:
-        items = list(GLOBAL_MEDIA_POOL)
-        random.shuffle(items)
-        channel_queues[cid] = items
-
-    total_jobs = sum(len(q) for q in channel_queues.values())
-    progress_step = max(1, total_jobs // 5)
-    completed = 0
-
-    while True:
-        # Build the list of channels that still have items to send
-        active = [cid for cid, q in channel_queues.items() if q]
-        if not active:
-            break  # done!
-
-        # Global daily ceiling — abort early if hit
-        if _get_today_global_total() >= GLOBAL_DAILY_LIMIT:
-            for cid in active:
-                skipped += len(channel_queues[cid])
-            reasons.append(f"global daily limit reached — stopping early")
-            break
-
-        # For each active channel, compute when it'll next be ready (the timestamp).
-        # A channel is "ready now" if elapsed >= its cooldown AND its quota isn't full.
-        now = datetime.utcnow().timestamp()
-        ready_now = []
-        soonest_ready_at = None
-        for cid in active:
-            # Daily cap for THIS channel
-            cap = _channel_daily_cap(cid)
-            if _get_today_counter(cid) >= cap:
-                # This channel done for today — drop its remaining items as "skipped"
-                dropped = len(channel_queues[cid])
-                skipped += dropped
-                reasons.append(f"chat {cid}: daily cap {cap} reached, "
-                               f"{dropped} items not sent today")
-                channel_queues[cid] = []
-                continue
-            cooldown = _channel_cooldown(cid)
-            last = LAST_SEND_TS.get(cid, 0)
-            ready_at = last + cooldown
-            if ready_at <= now:
-                ready_now.append(cid)
-            else:
-                if soonest_ready_at is None or ready_at < soonest_ready_at:
-                    soonest_ready_at = ready_at
-
-        # Re-prune (some may have just been emptied)
-        active = [cid for cid, q in channel_queues.items() if q]
-        if not active:
-            break
-
-        if ready_now:
-            # Pick the channel that's been waiting the longest (oldest last_send_ts)
-            ready_now.sort(key=lambda c: LAST_SEND_TS.get(c, 0))
-            chosen = ready_now[0]
-            media = channel_queues[chosen].pop(0)
-            ok, msg = await _send_one_safe(bot, chosen, media)
-            if ok:
-                success += 1
-                per_channel_sent[chosen] += 1
-            elif 'limit' in msg or 'cooldown' in msg:
-                # Put back at front of queue (race against quota)
-                channel_queues[chosen].insert(0, media)
-                skipped += 1
-                reasons.append(f"chat {chosen}: {msg}")
-                # Drop further items for this channel if it's a hard daily cap
-                if 'daily limit' in msg:
-                    skipped += len(channel_queues[chosen])
-                    channel_queues[chosen] = []
-            else:
-                failed += 1
-                reasons.append(f"chat {chosen}: {msg}")
-
-            completed += 1
-            # Progress ping
-            if progress_chat_id and completed % progress_step == 0:
-                try:
-                    await bot.send_message(
-                        progress_chat_id,
-                        f"⏳ Progress: {completed}/{total_jobs} "
-                        f"(✅ {success} sent · ⏭ {skipped} skipped · ❌ {failed} failed)"
-                    )
-                except Exception:
-                    pass
-
-            # GLOBAL gap before next send (regardless of which channel goes next).
-            # Adds randomness so consecutive cross-channel posts look natural.
-            gap = random.uniform(MIN_GAP_BETWEEN_SENDS_SEC, MAX_GAP_BETWEEN_SENDS_SEC)
-            await asyncio.sleep(gap)
-        else:
-            # No channel is ready right now — sleep until the soonest is ready.
-            # Cap the sleep at 5 minutes to avoid super-long blocks if cooldowns are huge
-            # (ASGI / process management still needs to breathe).
-            wait_seconds = min(300, max(5, soonest_ready_at - now))
-            await asyncio.sleep(wait_seconds)
-
-    save_data()
-    return {
-        'success': success,
-        'skipped': skipped,
-        'failed': failed,
-        'reasons': reasons,
-        'per_channel_sent': per_channel_sent
-    }
-# ─────────────────────────────────────────────────────────────────────────
-
-
-
-async def send_global_to_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Push the global media pool to one channel, multiple channels, or all.
-    Uses the safety orchestrator: jittered intervals, per-channel cooldown,
-    daily quota cap. NEVER sends in tight bursts. Skips channels that have
-    hit their daily limit. Honors Telegram flood-wait responses.
-
-    Usage:
-      /send_global_to CHANNEL_ID
-      /send_global_to all
-      /send_global_to ID1 ID2 ID3
-    """
-    if await ignore_non_admin(update, context):
-        return
-
-    if not GLOBAL_MEDIA_POOL:
-        await update.message.reply_text(
-            "❌ Global pool is empty.\n"
-            "Use /upload_global_media first.")
-        return
-
-    if not context.args:
-        text = "📤 *Send Global Pool to Channel(s)*\n\n"
-        text += "Usage:\n"
-        text += "• `/send_global_to CHANNEL_ID`\n"
-        text += "• `/send_global_to all`\n"
-        text += "• `/send_global_to ID1 ID2 ID3`\n\n"
-        text += f"Pool size: {len(GLOBAL_MEDIA_POOL)} items\n\n"
-        text += f"⚙️ Safety: {MIN_GAP_BETWEEN_SENDS_SEC}-{MAX_GAP_BETWEEN_SENDS_SEC}s gaps · "
-        text += f"{DAILY_LIMIT_PER_CHANNEL}/day per channel\n\n"
-        text += "*Your channels:*\n"
-        for cid, data in MANAGED_CHANNELS.items():
-            today_count = _get_today_counter(cid)
-            text += f"• {data['name']}: `{cid}` ({today_count}/{DAILY_LIMIT_PER_CHANNEL} today)\n"
-        await update.message.reply_text(text, parse_mode='Markdown')
-        return
-
-    # Resolve target channel list
-    target_channels = []
-    if context.args[0].lower() == 'all':
-        target_channels = list(MANAGED_CHANNELS.keys())
-    else:
-        for arg in context.args:
-            try:
-                cid = int(arg)
-                if cid in MANAGED_CHANNELS:
-                    target_channels.append(cid)
-                else:
-                    await update.message.reply_text(f"⚠️ Channel `{cid}` not managed — skipping",
-                                                    parse_mode='Markdown')
-            except ValueError:
-                await update.message.reply_text(f"⚠️ Invalid channel ID: {arg}")
-
-    if not target_channels:
-        await update.message.reply_text("❌ No valid channels to send to")
-        return
-
-    pool_size = len(GLOBAL_MEDIA_POOL)
-    total_jobs = pool_size * len(target_channels)
-    avg_gap = (MIN_GAP_BETWEEN_SENDS_SEC + MAX_GAP_BETWEEN_SENDS_SEC) / 2
-    estimated_min = int((total_jobs * avg_gap) / 60)
-
-    await update.message.reply_text(
-        f"⏳ *Starting safe send...*\n\n"
-        f"Pool: {pool_size} items × {len(target_channels)} channels = {total_jobs} sends\n"
-        f"Gap: {MIN_GAP_BETWEEN_SENDS_SEC}-{MAX_GAP_BETWEEN_SENDS_SEC}s random\n"
-        f"Estimated time: ~{estimated_min} min\n"
-        f"Per-channel cap: {DAILY_LIMIT_PER_CHANNEL}/day\n\n"
-        f"Order will be randomized across channels (not all-at-once).\n"
-        f"You'll get progress pings.",
-        parse_mode='Markdown')
-
-    # Run the safe orchestrator
-    result = await send_pool_to_channels_safely(
-        context.bot,
-        target_channels,
-        progress_chat_id=ADMIN_ID
-    )
-
-    # Final report
-    summary = (
-        f"✅ *Send Complete*\n\n"
-        f"✅ Sent:    {result['success']}\n"
-        f"⏭ Skipped: {result['skipped']}  (daily-limit / cooldown)\n"
-        f"❌ Failed:  {result['failed']}\n"
-        f"Channels: {len(target_channels)}\n"
-    )
-    pcs = result.get('per_channel_sent', {})
-    if pcs:
-        summary += "\n*Per-channel sent:*\n"
-        for cid, n in sorted(pcs.items(), key=lambda x: -x[1]):
-            name = MANAGED_CHANNELS.get(cid, {}).get('name', f'Chat {cid}')
-            cap = _channel_daily_cap(cid)
-            summary += f"• {name}: {n} (today total {_get_today_counter(cid)}/{cap})\n"
-    if result['skipped'] > 0 and result['reasons']:
-        summary += f"\n_First skip reasons:_\n"
-        for r in result['reasons'][:3]:
-            summary += f"  • {r}\n"
-    await update.message.reply_text(summary, parse_mode='Markdown')
-
-
-async def safety_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show today's send counters and current safety limits."""
-    if await ignore_non_admin(update, context):
-        return
-
-    today = _today_key()
-    today_counts = SEND_COUNTERS_BY_DAY.get(today, {})
-    total_today = sum(today_counts.values())
-
-    text = f"🛡️ *Safety Status* — {today} UTC\n\n"
-    text += f"*Today's sends:*\n"
-    text += f"Global: {total_today}/{GLOBAL_DAILY_LIMIT}\n\n"
-    if today_counts:
-        text += f"*Per-channel today:*\n"
-        for cid_str, count in sorted(today_counts.items(), key=lambda x: -x[1]):
-            try:
-                cid = int(cid_str)
-            except ValueError:
-                continue
-            name = MANAGED_CHANNELS.get(cid, {}).get('name', f'Channel {cid_str}')
-            cap = _channel_daily_cap(cid)
-            bar_pct = min(100, int(100 * count / cap)) if cap else 0
-            text += f"• {name}: {count}/{cap}  ({bar_pct}%)\n"
-    else:
-        text += "_No sends today yet._\n"
-
-    # Per-channel pacing summary
-    text += f"\n*Per-channel pacing:*\n"
-    if not MANAGED_CHANNELS:
-        text += "_(no channels)_\n"
-    for cid, data in MANAGED_CHANNELS.items():
-        cap = _channel_daily_cap(cid)
-        cap_label = f"{cap}/day"
-        if cid in CHANNEL_DAILY_LIMITS:
-            cap_label += " ⚙️"
-        if cid in CHANNEL_INTERVALS:
-            ci = CHANNEL_INTERVALS[cid]
-            pace = f"{ci['min']}-{ci['max']}min ⚙️"
-        else:
-            pace = f"{PER_CHANNEL_COOLDOWN_SEC}s default"
-        text += f"• {data['name']}: {cap_label} · {pace}\n"
-
-    text += (
-        f"\n*Global safety:*\n"
-        f"⏱  Gap between sends: {MIN_GAP_BETWEEN_SENDS_SEC}-{MAX_GAP_BETWEEN_SENDS_SEC}s (random)\n"
-        f"❄️  Default per-channel cooldown: {PER_CHANNEL_COOLDOWN_SEC}s\n"
-        f"📊 Default per-channel daily cap: {DAILY_LIMIT_PER_CHANNEL}\n"
-        f"🌐 Global daily cap: {GLOBAL_DAILY_LIMIT}\n\n"
-        f"⚙️ = channel-specific override is active\n\n"
-        f"_Adjust:_\n"
-        f"• `/set_safety_limits MIN MAX COOLDOWN PER_CH GLOBAL`\n"
-        f"• `/set_interval CHANNEL_ID MIN_MIN MAX_MIN` (per-channel pace)\n"
-        f"• `/set_channel_daily CHANNEL_ID LIMIT` (per-channel daily cap)"
-    )
-    await update.message.reply_text(text, parse_mode='Markdown')
-
-
-async def set_safety_limits_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Set the 5 safety limits in one go.
-    Usage: /set_safety_limits MIN_GAP MAX_GAP COOLDOWN PER_CH_DAILY GLOBAL_DAILY
-    """
-    global MIN_GAP_BETWEEN_SENDS_SEC, MAX_GAP_BETWEEN_SENDS_SEC
-    global PER_CHANNEL_COOLDOWN_SEC, DAILY_LIMIT_PER_CHANNEL, GLOBAL_DAILY_LIMIT
-
-    if await ignore_non_admin(update, context):
-        return
-
-    if len(context.args) != 5:
-        await update.message.reply_text(
-            "Usage: `/set_safety_limits MIN_GAP MAX_GAP COOLDOWN PER_CH_DAILY GLOBAL_DAILY`\n\n"
-            "All values are in seconds (gap/cooldown) or message counts (daily caps).\n\n"
-            "Recommended profiles:\n"
-            "• Conservative: `15 40 180 30 300`\n"
-            "• Default:      `8 25 90 50 500`\n"
-            "• Aggressive:   `5 15 45 80 800` (NOT recommended)\n",
-            parse_mode='Markdown')
-        return
-
-    try:
-        a, b, cooldown, per_ch, glob = [int(x) for x in context.args]
-        if a < 3 or b < a or cooldown < 30 or per_ch < 1 or glob < per_ch:
-            await update.message.reply_text(
-                "❌ Invalid values. Constraints:\n"
-                "• MIN_GAP ≥ 3 (Telegram-safe)\n"
-                "• MAX_GAP ≥ MIN_GAP\n"
-                "• COOLDOWN ≥ 30\n"
-                "• PER_CH_DAILY ≥ 1\n"
-                "• GLOBAL_DAILY ≥ PER_CH_DAILY")
-            return
-
-        MIN_GAP_BETWEEN_SENDS_SEC  = a
-        MAX_GAP_BETWEEN_SENDS_SEC  = b
-        PER_CHANNEL_COOLDOWN_SEC   = cooldown
-        DAILY_LIMIT_PER_CHANNEL    = per_ch
-        GLOBAL_DAILY_LIMIT         = glob
-        save_data()
-
-        await update.message.reply_text(
-            f"✅ Safety limits updated:\n\n"
-            f"⏱  Gap: {a}-{b}s\n"
-            f"❄️  Cooldown: {cooldown}s\n"
-            f"📊 Per-channel/day: {per_ch}\n"
-            f"🌐 Global/day: {glob}",
-            parse_mode='Markdown')
-    except ValueError:
-        await update.message.reply_text("❌ All 5 arguments must be integers")
-
-
-async def set_channel_daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Override the daily-cap for a specific channel. Use this to give your
-    Premium channel a tighter cap (e.g. 20/day) and your Tripwire channel
-    a looser one (e.g. 80/day), all under the same global ceiling.
-
-    Usage:
-      /set_channel_daily CHANNEL_ID DAILY_LIMIT
-      /set_channel_daily CHANNEL_ID 0      ← reset to global default
-    """
-    global CHANNEL_DAILY_LIMITS
-
-    if await ignore_non_admin(update, context):
-        return
-
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage: `/set_channel_daily CHANNEL_ID DAILY_LIMIT`\n\n"
-            f"Current global default: {DAILY_LIMIT_PER_CHANNEL}/day\n\n"
-            "*Existing per-channel overrides:*\n" +
-            (
-                "\n".join(
-                    f"• {MANAGED_CHANNELS.get(cid, {}).get('name', cid)}: {lim}"
-                    for cid, lim in CHANNEL_DAILY_LIMITS.items()
-                ) or "_(none — all channels use the global default)_"
-            ) +
-            "\n\nSet limit to `0` to remove the override.",
-            parse_mode='Markdown')
-        return
-
-    try:
-        channel_id = int(context.args[0])
-        limit = int(context.args[1])
-        if channel_id not in MANAGED_CHANNELS:
-            await update.message.reply_text("❌ Channel not managed")
-            return
-        if limit < 0:
-            await update.message.reply_text("❌ Limit must be ≥ 0 (use 0 to remove override)")
-            return
-
-        if limit == 0:
-            if channel_id in CHANNEL_DAILY_LIMITS:
-                del CHANNEL_DAILY_LIMITS[channel_id]
-            save_data()
-            await update.message.reply_text(
-                f"✅ Override removed for {MANAGED_CHANNELS[channel_id]['name']}\n"
-                f"Now uses global default: {DAILY_LIMIT_PER_CHANNEL}/day")
-        else:
-            CHANNEL_DAILY_LIMITS[channel_id] = limit
-            save_data()
-            await update.message.reply_text(
-                f"✅ Set {MANAGED_CHANNELS[channel_id]['name']} to {limit}/day")
-    except ValueError:
-        await update.message.reply_text("❌ Both arguments must be integers")
-
-
 # ========== LINKS UPLOAD COMMANDS ==========
 async def upload_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start links upload mode - send a TXT file with links"""
@@ -2078,6 +1285,7 @@ async def upload_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data['links_upload_channel'] = channel_id
         context.user_data['links_upload_mode'] = True
 
+        # Set channel content type to links
         CHANNEL_CONTENT_TYPE[channel_id] = 'links'
         save_data()
 
@@ -2220,12 +1428,14 @@ async def view_channel_config_command(update: Update, context: ContextTypes.DEFA
         bulk_mode = BULK_APPROVAL_MODE.get(channel_id, False)
         auto_post = AUTO_POST_ENABLED.get(channel_id, False)
 
+        # Count content
         media_count = len(CHANNEL_MEDIA_QUEUE.get(channel_id, []))
         links_count = len(CHANNEL_LINKS.get(channel_id, []))
         old_images = len(CHANNEL_SPECIFIC_IMAGES.get(channel_id, []))
         current_idx = CURRENT_IMAGE_INDEX.get(channel_id, 0)
         post_count = POST_COUNTER.get(channel_id, 0)
 
+        # Get interval (custom or default)
         if channel_id in CHANNEL_INTERVALS:
             interval_min = CHANNEL_INTERVALS[channel_id]['min']
             interval_max = CHANNEL_INTERVALS[channel_id]['max']
@@ -2285,7 +1495,7 @@ async def set_interval_command(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ Maximum must be greater than minimum")
             return
 
-        if max_mins > 1440:
+        if max_mins > 1440:  # 24 hours
             await update.message.reply_text("❌ Maximum interval cannot exceed 1440 minutes (24 hours)")
             return
 
@@ -2295,6 +1505,7 @@ async def set_interval_command(update: Update, context: ContextTypes.DEFAULT_TYP
         }
         save_data()
 
+        # Convert to hours for display
         min_hours = min_mins / 60
         max_hours = max_mins / 60
 
@@ -2493,7 +1704,7 @@ async def set_default_caption(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
     """Set default caption for posts"""
     global DEFAULT_CAPTION
-
+    
     if await ignore_non_admin(update, context):
         return
 
@@ -2516,7 +1727,7 @@ async def clear_default_caption(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
     """Clear default caption"""
     global DEFAULT_CAPTION
-
+    
     if await ignore_non_admin(update, context):
         return
 
@@ -2751,11 +1962,13 @@ async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         AUTO_POST_ENABLED[channel_id] = True
 
+        # Initialize post counter if not exists
         if channel_id not in POST_COUNTER:
             POST_COUNTER[channel_id] = 0
 
         save_data()
 
+        # Check content availability
         content_type = CHANNEL_CONTENT_TYPE.get(channel_id, 'media')
         if content_type == 'links':
             content_count = len(CHANNEL_LINKS.get(channel_id, []))
@@ -2776,7 +1989,8 @@ async def enable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• /upload_links for links")
             return
 
-        first_delay = random.randint(1, 3)
+        # Schedule first post
+        first_delay = random.randint(1, 3)  # Start quickly
         scheduler.add_job(
             auto_post_job,
             'date',
@@ -2818,6 +2032,7 @@ async def disable_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             AUTO_POST_ENABLED[channel_id] = False
             save_data()
 
+            # Remove scheduler job
             try:
                 scheduler.remove_job(f'autopost_{channel_id}')
             except:
@@ -2848,9 +2063,11 @@ async def autopost_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             post_count = POST_COUNTER.get(channel_id, 0)
             content_type = CHANNEL_CONTENT_TYPE.get(channel_id, 'media')
 
+            # Check promo status
             has_promo1 = channel_id in PROMO_IMAGES and 'promo1' in PROMO_IMAGES[channel_id]
             has_promo2 = channel_id in PROMO_IMAGES and 'promo2' in PROMO_IMAGES[channel_id]
 
+            # Get interval (custom or default)
             if channel_id in CHANNEL_INTERVALS:
                 interval_min = CHANNEL_INTERVALS[channel_id]['min']
                 interval_max = CHANNEL_INTERVALS[channel_id]['max']
@@ -2858,6 +2075,7 @@ async def autopost_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 interval_str = f"{DEFAULT_INTERVAL_MIN}-{DEFAULT_INTERVAL_MAX} mins (default)"
 
+            # Count content
             if content_type == 'links':
                 content_count = len(CHANNEL_LINKS.get(channel_id, []))
                 current_idx = CHANNEL_LINK_INDEX.get(channel_id, 0)
@@ -2892,20 +2110,24 @@ async def auto_post_job(bot, channel_id: int):
         if not AUTO_POST_ENABLED.get(channel_id):
             return
 
+        # Initialize post counter if needed
         if channel_id not in POST_COUNTER:
             POST_COUNTER[channel_id] = 0
 
+        # Increment counter
         POST_COUNTER[channel_id] += 1
         current_position = POST_COUNTER[channel_id]
 
         logger.info(f"🎯 Auto-post #{current_position} for channel {channel_id}")
 
+        # Determine channel content type
         content_type = CHANNEL_CONTENT_TYPE.get(channel_id, 'media')
 
         # ========== LINKS CHANNEL ==========
         if content_type == 'links':
             if channel_id not in CHANNEL_LINKS or not CHANNEL_LINKS[channel_id]:
                 logger.warning(f"No links available for channel {channel_id}")
+                # Schedule retry
                 scheduler.add_job(
                     auto_post_job,
                     'date',
@@ -2915,18 +2137,21 @@ async def auto_post_job(bot, channel_id: int):
                     replace_existing=True)
                 return
 
+            # Get current link index
             if channel_id not in CHANNEL_LINK_INDEX:
                 CHANNEL_LINK_INDEX[channel_id] = 0
 
             idx = CHANNEL_LINK_INDEX[channel_id]
             links = CHANNEL_LINKS[channel_id]
 
+            # Get link and move to next (loop when exhausted)
             link = links[idx]
             CHANNEL_LINK_INDEX[channel_id] = (idx + 1) % len(links)
 
             if CHANNEL_LINK_INDEX[channel_id] == 0:
                 logger.info(f"🔄 Links looped for channel {channel_id}")
 
+            # Post link without preview
             await bot.send_message(
                 chat_id=channel_id,
                 text=link,
@@ -2938,36 +2163,43 @@ async def auto_post_job(bot, channel_id: int):
 
         # ========== MEDIA CHANNEL (Images + Videos) ==========
         else:
+            # Check for promo pattern first
             position_mod = current_position % 10
             media_to_post = None
             is_promo = False
 
-            if position_mod == 5:
+            # Promo Pattern Check
+            if position_mod == 5:  # 5th, 15th, 25th...
                 if channel_id in PROMO_IMAGES and 'promo1' in PROMO_IMAGES[channel_id]:
                     media_to_post = PROMO_IMAGES[channel_id]['promo1']
                     is_promo = True
                     logger.info(f"🎯 Using PROMO 1 at position {current_position}")
-            elif position_mod == 0:
+            elif position_mod == 0:  # 10th, 20th, 30th...
                 if channel_id in PROMO_IMAGES and 'promo2' in PROMO_IMAGES[channel_id]:
                     media_to_post = PROMO_IMAGES[channel_id]['promo2']
                     is_promo = True
                     logger.info(f"🎯 Using PROMO 2 at position {current_position}")
 
+            # If not promo, get from media queue
             if not media_to_post:
+                # Try new media queue first
                 if channel_id in CHANNEL_MEDIA_QUEUE and CHANNEL_MEDIA_QUEUE[channel_id]:
                     media_list = CHANNEL_MEDIA_QUEUE[channel_id]
 
+                    # Initialize index if needed
                     if channel_id not in CURRENT_IMAGE_INDEX:
                         CURRENT_IMAGE_INDEX[channel_id] = 0
 
                     idx = CURRENT_IMAGE_INDEX[channel_id]
                     media_to_post = media_list[idx]
 
+                    # Move to next (loop when exhausted)
                     CURRENT_IMAGE_INDEX[channel_id] = (idx + 1) % len(media_list)
 
                     if CURRENT_IMAGE_INDEX[channel_id] == 0:
                         logger.info(f"🔄 Media queue looped for channel {channel_id}")
 
+                # Fall back to old image format
                 elif channel_id in CHANNEL_SPECIFIC_IMAGES and CHANNEL_SPECIFIC_IMAGES[channel_id]:
                     images = CHANNEL_SPECIFIC_IMAGES[channel_id]
 
@@ -2985,6 +2217,7 @@ async def auto_post_job(bot, channel_id: int):
 
                     CURRENT_IMAGE_INDEX[channel_id] = (idx + 1) % len(images)
 
+                # Fall back to global images
                 elif UPLOADED_IMAGES:
                     if channel_id not in CURRENT_IMAGE_INDEX:
                         CURRENT_IMAGE_INDEX[channel_id] = 0
@@ -3002,6 +2235,7 @@ async def auto_post_job(bot, channel_id: int):
 
                 else:
                     logger.warning(f"No media available for channel {channel_id}")
+                    # Schedule retry
                     scheduler.add_job(
                         auto_post_job,
                         'date',
@@ -3011,8 +2245,10 @@ async def auto_post_job(bot, channel_id: int):
                         replace_existing=True)
                     return
 
+            # Select random emoji
             random_emoji = random.choice(CAPTION_EMOJIS)
 
+            # Determine caption
             base_caption = ""
             if media_to_post.get('caption'):
                 base_caption = media_to_post['caption']
@@ -3021,14 +2257,17 @@ async def auto_post_job(bot, channel_id: int):
             elif DEFAULT_CAPTION:
                 base_caption = DEFAULT_CAPTION
 
+            # Add random emoji
             if base_caption:
                 caption_to_use = f"{random_emoji} {base_caption}"
             else:
                 caption_to_use = random_emoji
 
+            # Get file_id and type
             file_id = media_to_post['file_id']
             media_type = media_to_post.get('type', 'photo')
 
+            # Post based on media type
             if media_type == 'video':
                 await bot.send_video(
                     chat_id=channel_id,
@@ -3047,6 +2286,7 @@ async def auto_post_job(bot, channel_id: int):
 
         save_data()
 
+        # Schedule next post with interval (custom or default)
         if channel_id in CHANNEL_INTERVALS:
             interval_min = CHANNEL_INTERVALS[channel_id]['min']
             interval_max = CHANNEL_INTERVALS[channel_id]['max']
@@ -3070,6 +2310,7 @@ async def auto_post_job(bot, channel_id: int):
     except Exception as e:
         logger.error(f"❌ Auto-post failed for channel {channel_id}: {e}")
 
+        # Retry in 20 minutes on error
         try:
             retry_time = datetime.now() + timedelta(minutes=20)
             scheduler.add_job(
@@ -3093,11 +2334,13 @@ async def export_users_report(update: Update,
         await update.message.reply_text("No user data to export")
         return
 
+    # Create CSV
     csv_text = "User ID,First Name,Last Name,Username,Channels\n"
     for user_id, data in USER_DATABASE.items():
         channels = ', '.join([ch['channel_name'] for ch in data['channels'].values()])
         csv_text += f"{user_id},{data['first_name']},{data['last_name']},{data['username']},{channels}\n"
 
+    # Send as file
     file = BytesIO(csv_text.encode('utf-8'))
     file.name = f"users_{datetime.now().strftime('%Y%m%d')}.csv"
 
@@ -3148,7 +2391,7 @@ async def view_unauthorized_attempts(update: Update,
         return
 
     text = "🚨 *Unauthorized Attempts*\n\n"
-    for attempt in UNAUTHORIZED_ATTEMPTS[-10:]:
+    for attempt in UNAUTHORIZED_ATTEMPTS[-10:]:  # Last 10
         text += (f"User: {attempt['first_name']}\n"
                 f"ID: `{attempt['user_id']}`\n"
                 f"Command: {attempt['command']}\n"
@@ -3273,14 +2516,18 @@ async def view_recent_activity(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("No recent activity")
         return
 
+    # Group by type
     approved = [a for a in RECENT_ACTIVITY if a['type'] == 'auto_approved']
     rejected = [a for a in RECENT_ACTIVITY if a['type'] == 'auto_rejected']
 
     text = "📊 Recent Activity\n\n"
+
+    # Show summary
     text += f"✅ Auto-Approved: {len(approved)}\n"
     text += f"❌ Auto-Rejected: {len(rejected)}\n"
     text += f"⚠️ Pending Captcha: {len(PENDING_VERIFICATIONS)}\n\n"
 
+    # Show last 10 approved
     if approved:
         text += "━━━━━━━━━━━━━━━━━━\n"
         text += "✅ Recently Approved:\n\n"
@@ -3290,6 +2537,7 @@ async def view_recent_activity(update: Update, context: ContextTypes.DEFAULT_TYP
             text += f"  Channel: {activity['channel']}\n"
             text += f"  Time: {activity['timestamp'].strftime('%H:%M')}\n\n"
 
+    # Show last 5 rejected
     if rejected:
         text += "━━━━━━━━━━━━━━━━━━\n"
         text += "❌ Recently Rejected:\n\n"
@@ -3321,14 +2569,14 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bulk_enabled = sum(1 for v in BULK_APPROVAL_MODE.values() if v)
     active_autoposts = sum(1 for v in AUTO_POST_ENABLED.values() if v)
 
+    # Count recent activity
     recent_approved = sum(1 for a in RECENT_ACTIVITY if a['type'] == 'auto_approved')
     recent_rejected = sum(1 for a in RECENT_ACTIVITY if a['type'] == 'auto_rejected')
 
+    # Count content
     total_media = sum(len(m) for m in CHANNEL_MEDIA_QUEUE.values())
     total_links = sum(len(l) for l in CHANNEL_LINKS.values())
     promo_count = sum(1 for promos in PROMO_IMAGES.values() if promos)
-
-    telemetry_status = "✅ Connected" if _supabase_ready else "❌ Disabled"
 
     text = (f"📊 Statistics\n\n"
             f"📢 Channels: {len(MANAGED_CHANNELS)}\n"
@@ -3347,8 +2595,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🤖 Auto-Posts: {active_autoposts} active\n"
             f"👥 Total Users: {len(USER_DATABASE)}\n"
             f"🚨 Unauthorized: {len(UNAUTHORIZED_ATTEMPTS)}\n\n"
-            f"🌐 Fallback: {GLOBAL_FALLBACK_CHANNEL or 'Not set'}\n"
-            f"📡 Supabase Telemetry: {telemetry_status}\n\n"
+            f"🌐 Fallback: {GLOBAL_FALLBACK_CHANNEL or 'Not set'}\n\n"
             f"Use /recent_activity for details\n\n"
             f"Status: Online 24/7 ✅")
     await update.message.reply_text(text)
@@ -3368,6 +2615,7 @@ async def handle_bulk_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await ignore_non_admin(update, context):
         return
 
+    # Check if in links upload mode
     if context.user_data.get('links_upload_mode'):
         await handle_links_file(update, context)
         return
@@ -3389,6 +2637,7 @@ async def handle_links_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = update.message
 
+    # Handle TXT file
     if message.document:
         if message.document.file_name and message.document.file_name.endswith('.txt'):
             try:
@@ -3396,6 +2645,7 @@ async def handle_links_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_bytes = await file.download_as_bytearray()
                 content = file_bytes.decode('utf-8')
 
+                # Extract links (one per line)
                 lines = content.strip().split('\n')
 
                 if channel_id not in CHANNEL_LINKS:
@@ -3431,6 +2681,7 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     message = update.message
 
+    # Determine media type and get file_id
     media_type = None
     file_id = None
     caption = message.caption or ""
@@ -3442,16 +2693,19 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         media_type = 'video'
         file_id = message.video.file_id
     elif message.document:
+        # Check if it's a video sent as document
         if message.document.mime_type and message.document.mime_type.startswith('video/'):
             media_type = 'video'
             file_id = message.document.file_id
+        # Check if it's an image sent as document
         elif message.document.mime_type and message.document.mime_type.startswith('image/'):
             media_type = 'photo'
             file_id = message.document.file_id
 
     if not media_type or not file_id:
-        return
+        return  # Not a media file we handle
 
+    # Check if setting promo image
     if context.user_data.get('setting_promo1'):
         channel_id = context.user_data['setting_promo1']
 
@@ -3492,18 +2746,7 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode='Markdown')
         return
 
-    # NEW: Global media pool — no channel binding
-    if context.user_data.get('global_upload_mode'):
-        GLOBAL_MEDIA_POOL.append({
-            'type': media_type,
-            'file_id': file_id,
-            'caption': caption
-        })
-        save_data()
-        count = len(GLOBAL_MEDIA_POOL)
-        logger.info(f"✅ {media_type} added to GLOBAL pool. Total: {count}")
-        return
-
+    # NEW: Handle media upload mode (images + videos in sequence)
     if context.user_data.get('media_upload_mode'):
         channel_id = context.user_data.get('media_upload_channel')
 
@@ -3511,6 +2754,7 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             if channel_id not in CHANNEL_MEDIA_QUEUE:
                 CHANNEL_MEDIA_QUEUE[channel_id] = []
 
+            # Add to queue (maintains upload order!)
             CHANNEL_MEDIA_QUEUE[channel_id].append({
                 'type': media_type,
                 'file_id': file_id,
@@ -3519,10 +2763,12 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             save_data()
 
+            # Silent - only log
             count = len(CHANNEL_MEDIA_QUEUE[channel_id])
             logger.info(f"✅ {media_type} added to channel {channel_id}. Total: {count}")
         return
 
+    # OLD: Handle old uploading mode (backward compatibility)
     if context.user_data.get('uploading_mode'):
         if media_type == 'photo':
             image_data = {
@@ -3543,6 +2789,7 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             save_data()
         return
 
+    # Handle quick send mode
     if context.user_data.get('quick_send_mode'):
         channel_id = context.user_data.get('quick_send_channel')
 
@@ -3565,11 +2812,13 @@ async def handle_text_content(update: Update, context: ContextTypes.DEFAULT_TYPE
     if await ignore_non_admin(update, context):
         return
 
+    # Check if in links upload mode
     if context.user_data.get('links_upload_mode'):
         channel_id = context.user_data.get('links_upload_channel')
         if channel_id and update.message.text:
             text = update.message.text.strip()
 
+            # Check if it's a link
             if text.startswith('http://') or text.startswith('https://'):
                 if channel_id not in CHANNEL_LINKS:
                     CHANNEL_LINKS[channel_id] = []
@@ -3577,13 +2826,16 @@ async def handle_text_content(update: Update, context: ContextTypes.DEFAULT_TYPE
                 CHANNEL_LINKS[channel_id].append(text)
                 save_data()
 
+                # Silent - only log
                 logger.info(f"✅ Link added to channel {channel_id}. Total: {len(CHANNEL_LINKS[channel_id])}")
         return
 
+    # Handle posting mode
     if context.user_data.get('posting_mode'):
         await handle_content_posting(update, context)
         return
 
+    # Handle quick send mode
     if context.user_data.get('quick_send_mode'):
         channel_id = context.user_data.get('quick_send_channel')
         if channel_id and update.message.text:
@@ -3709,6 +2961,7 @@ async def weekly_report_job(bot):
         logger.error(f"Weekly report failed: {e}")
 
 
+# Error handler
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Log errors"""
     logger.error(f"Exception: {context.error}")
@@ -3716,7 +2969,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Main function to start the bot"""
-    logger.info("🚀 Starting SMART VERIFICATION BOT v2.1 (Supabase telemetry)...")
+    logger.info("🚀 Starting SMART VERIFICATION BOT v2.0...")
     logger.info(f"✅ Admin ID: {ADMIN_ID}")
     logger.info(f"✅ Storage: {STORAGE_FILE}")
     logger.info(f"✅ Random Emojis: {len(CAPTION_EMOJIS)} emojis")
@@ -3727,9 +2980,6 @@ def main():
 
     # Load saved data
     load_data()
-
-    # Initialize Supabase telemetry (silently no-ops if env vars missing)
-    _init_supabase()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -3755,33 +3005,23 @@ def main():
     app.add_handler(CommandHandler("set_fallback", set_fallback_command))
     app.add_handler(CommandHandler("clear_fallback", clear_fallback_command))
 
-    # Media upload commands
+    # NEW: Media upload commands
     app.add_handler(CommandHandler("upload_media", upload_media_command))
     app.add_handler(CommandHandler("done_media", done_media_command))
     app.add_handler(CommandHandler("list_media", list_media_command))
     app.add_handler(CommandHandler("clear_media", clear_media_command))
 
-    # Global media pool commands (no channel binding)
-    app.add_handler(CommandHandler("upload_global_media", upload_global_media_command))
-    app.add_handler(CommandHandler("done_global_media", done_global_media_command))
-    app.add_handler(CommandHandler("list_global_media", list_global_media_command))
-    app.add_handler(CommandHandler("clear_global_media", clear_global_media_command))
-    app.add_handler(CommandHandler("send_global_to", send_global_to_command))
-    app.add_handler(CommandHandler("safety_status", safety_status_command))
-    app.add_handler(CommandHandler("set_safety_limits", set_safety_limits_command))
-    app.add_handler(CommandHandler("set_channel_daily", set_channel_daily_command))
-
-    # Links upload commands
+    # NEW: Links upload commands
     app.add_handler(CommandHandler("upload_links", upload_links_command))
     app.add_handler(CommandHandler("done_links", done_links_command))
     app.add_handler(CommandHandler("list_links", list_links_command))
     app.add_handler(CommandHandler("clear_links", clear_links_command))
 
-    # Channel config commands
+    # NEW: Channel config commands
     app.add_handler(CommandHandler("set_channel_type", set_channel_type_command))
     app.add_handler(CommandHandler("view_config", view_channel_config_command))
 
-    # Interval commands
+    # NEW: Interval commands
     app.add_handler(CommandHandler("set_interval", set_interval_command))
     app.add_handler(CommandHandler("clear_interval", clear_interval_command))
     app.add_handler(CommandHandler("view_intervals", view_intervals_command))
@@ -3844,11 +3084,6 @@ def main():
     # Text handler (for links and other text)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_content))
 
-    # NEW: Track actual joins/leaves/kicks via chat_member updates
-    app.add_handler(
-        ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER)
-    )
-
     # Join request handler - THE KEY COMPONENT
     app.add_handler(ChatJoinRequestHandler(handle_join_request))
 
@@ -3866,6 +3101,7 @@ def main():
     for channel_id, enabled in AUTO_POST_ENABLED.items():
         if enabled:
             try:
+                # Start with small random delay
                 delay = random.randint(1, 5)
                 scheduler.add_job(auto_post_job,
                                   'date',
@@ -3883,7 +3119,6 @@ def main():
     logger.info(f"✅ Loaded: {len(MANAGED_CHANNELS)} channels")
     logger.info(f"✅ Media Queues: {sum(len(m) for m in CHANNEL_MEDIA_QUEUE.values())} items")
     logger.info(f"✅ Links: {sum(len(l) for l in CHANNEL_LINKS.values())} items")
-    logger.info(f"✅ Supabase Telemetry: {'ENABLED' if _supabase_ready else 'DISABLED (env vars missing)'}")
 
     # Railway fix: Drop pending updates on restart
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
