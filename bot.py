@@ -65,6 +65,31 @@ CHANNEL_INTERVALS = {}
 DEFAULT_INTERVAL_MIN = 12
 DEFAULT_INTERVAL_MAX = 28
 
+# Global media pool — single shared pool of images+videos (no channel binding)
+# Useful when same content should be sendable to ANY channel.
+# Each entry: {'type': 'photo'|'video', 'file_id': str, 'caption': str}
+GLOBAL_MEDIA_POOL = []
+
+# ─── SAFETY LIMITS ────────────────────────────────────────────────────────
+# Telegram's published limits: 30 msgs/sec total, 20 msgs/min per chat.
+# These are CONSERVATIVE defaults that stay well below any threshold
+# Telegram is likely to flag. Adjust via /set_safety_limits if you really
+# need to push higher — but lower is always safer.
+DAILY_LIMIT_PER_CHANNEL    = 50       # default daily cap per channel
+GLOBAL_DAILY_LIMIT         = 500      # max messages across ALL channels per 24h
+MIN_GAP_BETWEEN_SENDS_SEC  = 8        # global min gap (any two sends in the system)
+MAX_GAP_BETWEEN_SENDS_SEC  = 25       # global max gap
+PER_CHANNEL_COOLDOWN_SEC   = 90       # default cooldown between two sends to same channel
+
+# Per-channel daily caps that override DAILY_LIMIT_PER_CHANNEL when set
+# Shape: {channel_id: int}
+CHANNEL_DAILY_LIMITS = {}
+# Per-day counter of sends, so we can enforce DAILY_LIMIT_PER_CHANNEL
+# Shape: {'2026-04-29': {channel_id: int, ...}, ...}
+SEND_COUNTERS_BY_DAY = {}
+# Last-send timestamp per channel, used for PER_CHANNEL_COOLDOWN_SEC
+LAST_SEND_TS = {}
+
 # Emoji rotation for pattern breaking
 CAPTION_EMOJIS = [
     '🎬', '🔥', '⚡', '💎', '✨', '🎯', '🚀', '⭐',
@@ -187,7 +212,15 @@ def save_data():
             'channel_links': CHANNEL_LINKS,
             'channel_link_index': CHANNEL_LINK_INDEX,
             'channel_content_type': CHANNEL_CONTENT_TYPE,
-            'channel_intervals': CHANNEL_INTERVALS
+            'channel_intervals': CHANNEL_INTERVALS,
+            'global_media_pool': GLOBAL_MEDIA_POOL,
+            'send_counters_by_day': SEND_COUNTERS_BY_DAY,
+            'safety_daily_per_channel': DAILY_LIMIT_PER_CHANNEL,
+            'safety_daily_global': GLOBAL_DAILY_LIMIT,
+            'safety_min_gap': MIN_GAP_BETWEEN_SENDS_SEC,
+            'safety_max_gap': MAX_GAP_BETWEEN_SENDS_SEC,
+            'safety_channel_cooldown': PER_CHANNEL_COOLDOWN_SEC,
+            'channel_daily_limits': CHANNEL_DAILY_LIMITS
         }
         with open(STORAGE_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, default=str)
@@ -204,6 +237,10 @@ def load_data():
     global PROMO_IMAGES, POST_COUNTER
     global GLOBAL_FALLBACK_CHANNEL, CHANNEL_MEDIA_QUEUE, CHANNEL_LINKS
     global CHANNEL_LINK_INDEX, CHANNEL_CONTENT_TYPE, CHANNEL_INTERVALS
+    global GLOBAL_MEDIA_POOL, SEND_COUNTERS_BY_DAY
+    global DAILY_LIMIT_PER_CHANNEL, GLOBAL_DAILY_LIMIT
+    global MIN_GAP_BETWEEN_SENDS_SEC, MAX_GAP_BETWEEN_SENDS_SEC
+    global PER_CHANNEL_COOLDOWN_SEC, CHANNEL_DAILY_LIMITS
 
     try:
         if os.path.exists(STORAGE_FILE):
@@ -229,6 +266,19 @@ def load_data():
             CHANNEL_LINK_INDEX = data.get('channel_link_index', {})
             CHANNEL_CONTENT_TYPE = data.get('channel_content_type', {})
             CHANNEL_INTERVALS = data.get('channel_intervals', {})
+            GLOBAL_MEDIA_POOL = data.get('global_media_pool', [])
+            SEND_COUNTERS_BY_DAY = data.get('send_counters_by_day', {})
+            DAILY_LIMIT_PER_CHANNEL    = data.get('safety_daily_per_channel', DAILY_LIMIT_PER_CHANNEL)
+            GLOBAL_DAILY_LIMIT         = data.get('safety_daily_global', GLOBAL_DAILY_LIMIT)
+            MIN_GAP_BETWEEN_SENDS_SEC  = data.get('safety_min_gap', MIN_GAP_BETWEEN_SENDS_SEC)
+            MAX_GAP_BETWEEN_SENDS_SEC  = data.get('safety_max_gap', MAX_GAP_BETWEEN_SENDS_SEC)
+            PER_CHANNEL_COOLDOWN_SEC   = data.get('safety_channel_cooldown', PER_CHANNEL_COOLDOWN_SEC)
+            CHANNEL_DAILY_LIMITS       = data.get('channel_daily_limits', {})
+            # Convert string keys to int (Supabase / JSON stringifies them)
+            CHANNEL_DAILY_LIMITS = {
+                int(k) if str(k).lstrip('-').isdigit() else k: v
+                for k, v in CHANNEL_DAILY_LIMITS.items()
+            }
 
             def convert_keys(d):
                 return {
@@ -770,6 +820,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/done_media - Finish upload\n"
             "/list_media - View media\n"
             "/clear_media - Clear media\n\n"
+
+            "━━━ GLOBAL MEDIA POOL ━━━\n"
+            "/upload_global_media - No channel ID\n"
+            "/done_global_media - Finish upload\n"
+            "/list_global_media - View pool\n"
+            "/clear_global_media - Clear pool\n"
+            "/send_global_to - Push to channels\n\n"
+
+            "━━━ SAFETY LIMITS ━━━\n"
+            "/safety_status - Today's send counts\n"
+            "/set_safety_limits - Adjust caps\n"
+            "/set_channel_daily - Per-ch daily cap\n\n"
 
             "━━━ LINKS UPLOAD ━━━\n"
             "/upload_links - Upload links\n"
@@ -1363,6 +1425,624 @@ async def clear_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     except ValueError:
         await update.message.reply_text("❌ Invalid channel ID")
+
+
+# ========== GLOBAL MEDIA POOL COMMANDS ==========
+# A shared pool of images+videos with no channel binding. Upload once, then
+# push to ANY channel (or all channels) on demand. Useful for content that's
+# relevant to multiple channels.
+
+async def upload_global_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start global media upload mode (no channel ID needed)."""
+    if await ignore_non_admin(update, context):
+        return
+
+    context.user_data['global_upload_mode'] = True
+    # Make sure no channel-bound upload mode is active
+    context.user_data['media_upload_mode'] = False
+    context.user_data['media_upload_channel'] = None
+    context.user_data['uploading_mode'] = False
+
+    pool_size = len(GLOBAL_MEDIA_POOL)
+    images = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'photo')
+    videos = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'video')
+
+    await update.message.reply_text(
+        f"🌐 *Global Media Upload Mode*\n\n"
+        f"✅ Send IMAGES and VIDEOS now\n"
+        f"📝 With or without captions\n"
+        f"🔢 Sequence is preserved\n"
+        f"🔇 Silent mode (no per-upload reply)\n\n"
+        f"Current pool: {pool_size} items "
+        f"(📷 {images} images · 🎬 {videos} videos)\n\n"
+        f"Use /done_global_media when finished\n"
+        f"Then /send_global_to to push to channels",
+        parse_mode='Markdown')
+
+
+async def done_global_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Finish global media upload mode."""
+    if await ignore_non_admin(update, context):
+        return
+
+    context.user_data['global_upload_mode'] = False
+
+    pool_size = len(GLOBAL_MEDIA_POOL)
+    images = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'photo')
+    videos = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'video')
+
+    await update.message.reply_text(
+        f"✅ *Global Pool Ready*\n\n"
+        f"Total: {pool_size} items\n"
+        f"📷 Images: {images}\n"
+        f"🎬 Videos: {videos}\n\n"
+        f"Next: `/send_global_to CHANNEL_ID` (or `all`)",
+        parse_mode='Markdown')
+
+
+async def list_global_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show what's in the global pool."""
+    if await ignore_non_admin(update, context):
+        return
+
+    pool_size = len(GLOBAL_MEDIA_POOL)
+    if pool_size == 0:
+        await update.message.reply_text(
+            "🌐 *Global Media Pool*\n\n"
+            "Pool is empty.\n"
+            "Use /upload_global_media to add items.",
+            parse_mode='Markdown')
+        return
+
+    images = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'photo')
+    videos = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('type') == 'video')
+    with_captions = sum(1 for m in GLOBAL_MEDIA_POOL if m.get('caption'))
+
+    text = (
+        f"🌐 *Global Media Pool*\n\n"
+        f"Total items: {pool_size}\n"
+        f"📷 Images: {images}\n"
+        f"🎬 Videos: {videos}\n"
+        f"✏️ With captions: {with_captions}\n\n"
+        f"*First few entries:*\n"
+    )
+    for i, m in enumerate(GLOBAL_MEDIA_POOL[:5], 1):
+        cap = (m.get('caption') or '').strip()
+        cap_preview = (cap[:30] + '…') if len(cap) > 30 else (cap or '_(no caption)_')
+        text += f"{i}. {m.get('type', '?')} — {cap_preview}\n"
+    if pool_size > 5:
+        text += f"\n... and {pool_size - 5} more\n"
+
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def clear_global_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear the global media pool."""
+    if await ignore_non_admin(update, context):
+        return
+
+    pool_size = len(GLOBAL_MEDIA_POOL)
+    GLOBAL_MEDIA_POOL.clear()
+    save_data()
+
+    await update.message.reply_text(f"✅ Global pool cleared ({pool_size} items removed)")
+
+
+# ─── SAFETY HELPERS ───────────────────────────────────────────────────────
+def _today_key():
+    """Day key in UTC; counters reset at midnight UTC."""
+    return datetime.utcnow().strftime('%Y-%m-%d')
+
+
+def _get_today_counter(channel_id: int) -> int:
+    """How many sends already done today to this channel?"""
+    day = _today_key()
+    return SEND_COUNTERS_BY_DAY.get(day, {}).get(str(channel_id), 0)
+
+
+def _get_today_global_total() -> int:
+    """How many total sends today across ALL channels?"""
+    day = _today_key()
+    return sum(SEND_COUNTERS_BY_DAY.get(day, {}).values())
+
+
+def _bump_counter(channel_id: int):
+    """Record one send for today."""
+    day = _today_key()
+    if day not in SEND_COUNTERS_BY_DAY:
+        # Garbage-collect counters older than 7 days while we're here
+        cutoff = (datetime.utcnow() - timedelta(days=7)).strftime('%Y-%m-%d')
+        for old_day in list(SEND_COUNTERS_BY_DAY.keys()):
+            if old_day < cutoff:
+                del SEND_COUNTERS_BY_DAY[old_day]
+        SEND_COUNTERS_BY_DAY[day] = {}
+    SEND_COUNTERS_BY_DAY[day][str(channel_id)] = (
+        SEND_COUNTERS_BY_DAY[day].get(str(channel_id), 0) + 1
+    )
+
+
+def _channel_daily_cap(channel_id: int) -> int:
+    """Resolve daily cap for a channel — per-channel override OR global default."""
+    return CHANNEL_DAILY_LIMITS.get(channel_id, DAILY_LIMIT_PER_CHANNEL)
+
+
+def _channel_cooldown(channel_id: int) -> float:
+    """
+    Resolve cooldown (seconds) between two posts to a channel.
+    If CHANNEL_INTERVALS has a min/max in MINUTES for this channel, use the MIN
+    as the cooldown floor — that's the channel's own pace setting from
+    /set_interval. Otherwise fall back to global PER_CHANNEL_COOLDOWN_SEC.
+    """
+    if channel_id in CHANNEL_INTERVALS:
+        # Channel-specific interval is in minutes; convert to seconds.
+        # We use min*60 as the floor (don't go faster than the channel's min interval).
+        return CHANNEL_INTERVALS[channel_id]['min'] * 60
+    return PER_CHANNEL_COOLDOWN_SEC
+
+
+def _can_send_to_channel(channel_id: int) -> tuple[bool, str]:
+    """Check daily-quota and cooldown. Returns (allowed, reason_if_not)."""
+    # Per-channel daily quota (channel-specific or default)
+    cap = _channel_daily_cap(channel_id)
+    today_for_channel = _get_today_counter(channel_id)
+    if today_for_channel >= cap:
+        return False, f"daily limit hit ({today_for_channel}/{cap})"
+    # Global daily quota
+    today_global = _get_today_global_total()
+    if today_global >= GLOBAL_DAILY_LIMIT:
+        return False, f"global daily limit hit ({today_global}/{GLOBAL_DAILY_LIMIT})"
+    # Per-channel cooldown — uses channel-specific interval if set
+    cooldown = _channel_cooldown(channel_id)
+    last_ts = LAST_SEND_TS.get(channel_id, 0)
+    elapsed = datetime.utcnow().timestamp() - last_ts
+    if elapsed < cooldown:
+        return False, f"channel cooldown ({int(cooldown - elapsed)}s left)"
+    return True, ""
+
+
+async def _send_one_safe(bot, channel_id: int, media: dict) -> tuple[bool, str]:
+    """
+    Send one media item to one channel with all safety checks.
+    Returns (success, message).
+    """
+    allowed, reason = _can_send_to_channel(channel_id)
+    if not allowed:
+        return False, reason
+
+    try:
+        random_emoji = random.choice(CAPTION_EMOJIS)
+        base_caption = ""
+        if media.get('caption'):
+            base_caption = media['caption']
+        elif channel_id in CHANNEL_DEFAULT_CAPTIONS:
+            base_caption = CHANNEL_DEFAULT_CAPTIONS[channel_id]
+        elif DEFAULT_CAPTION:
+            base_caption = DEFAULT_CAPTION
+        final_caption = f"{random_emoji} {base_caption}" if base_caption else random_emoji
+
+        if media.get('type') == 'video':
+            await bot.send_video(channel_id, media['file_id'], caption=final_caption)
+        else:
+            await bot.send_photo(channel_id, media['file_id'], caption=final_caption)
+
+        # Record the send for quota tracking
+        _bump_counter(channel_id)
+        LAST_SEND_TS[channel_id] = datetime.utcnow().timestamp()
+        return True, "ok"
+
+    except Exception as e:
+        msg = str(e)
+        # If Telegram tells us to back off, honor it
+        if 'flood' in msg.lower() or 'retry after' in msg.lower():
+            logger.warning(f"⚠️  Telegram rate-limit on {channel_id}: {msg}")
+            # Sleep 60s then return failure so caller can decide
+            await asyncio.sleep(60)
+        return False, msg
+
+
+async def send_pool_to_channels_safely(bot, target_channels: list[int],
+                                        progress_chat_id: int = None) -> dict:
+    """
+    CHANNEL-AWARE scheduler. Each channel has its own:
+      • daily cap (CHANNEL_DAILY_LIMITS or default)
+      • interval/cooldown (CHANNEL_INTERVALS or default)
+    Plus global guardrails:
+      • GLOBAL_DAILY_LIMIT — total across all channels
+      • MIN/MAX_GAP_BETWEEN_SENDS_SEC — applies to consecutive sends
+        anywhere in the system (so different channels stagger naturally)
+
+    Algorithm: at each step, look at all channels with items still to send,
+    pick the one that's been waiting longest AND is past its cooldown.
+    If no channel is ready right now, sleep until the earliest one is ready.
+    Adds a small random jitter on top so post times look natural.
+
+    Returns: {success, skipped, failed, reasons, per_channel_sent}
+    """
+    success = 0
+    skipped = 0
+    failed = 0
+    reasons = []
+    per_channel_sent = {cid: 0 for cid in target_channels}
+
+    if not GLOBAL_MEDIA_POOL or not target_channels:
+        return {'success': 0, 'skipped': 0, 'failed': 0, 'reasons': [], 'per_channel_sent': {}}
+
+    # Each channel has its own queue of items to send (a copy of the pool,
+    # shuffled per-channel so order differs across channels)
+    channel_queues = {}
+    for cid in target_channels:
+        items = list(GLOBAL_MEDIA_POOL)
+        random.shuffle(items)
+        channel_queues[cid] = items
+
+    total_jobs = sum(len(q) for q in channel_queues.values())
+    progress_step = max(1, total_jobs // 5)
+    completed = 0
+
+    while True:
+        # Build the list of channels that still have items to send
+        active = [cid for cid, q in channel_queues.items() if q]
+        if not active:
+            break  # done!
+
+        # Global daily ceiling — abort early if hit
+        if _get_today_global_total() >= GLOBAL_DAILY_LIMIT:
+            for cid in active:
+                skipped += len(channel_queues[cid])
+            reasons.append(f"global daily limit reached — stopping early")
+            break
+
+        # For each active channel, compute when it'll next be ready (the timestamp).
+        # A channel is "ready now" if elapsed >= its cooldown AND its quota isn't full.
+        now = datetime.utcnow().timestamp()
+        ready_now = []
+        soonest_ready_at = None
+        for cid in active:
+            # Daily cap for THIS channel
+            cap = _channel_daily_cap(cid)
+            if _get_today_counter(cid) >= cap:
+                # This channel done for today — drop its remaining items as "skipped"
+                dropped = len(channel_queues[cid])
+                skipped += dropped
+                reasons.append(f"chat {cid}: daily cap {cap} reached, "
+                               f"{dropped} items not sent today")
+                channel_queues[cid] = []
+                continue
+            cooldown = _channel_cooldown(cid)
+            last = LAST_SEND_TS.get(cid, 0)
+            ready_at = last + cooldown
+            if ready_at <= now:
+                ready_now.append(cid)
+            else:
+                if soonest_ready_at is None or ready_at < soonest_ready_at:
+                    soonest_ready_at = ready_at
+
+        # Re-prune (some may have just been emptied)
+        active = [cid for cid, q in channel_queues.items() if q]
+        if not active:
+            break
+
+        if ready_now:
+            # Pick the channel that's been waiting the longest (oldest last_send_ts)
+            ready_now.sort(key=lambda c: LAST_SEND_TS.get(c, 0))
+            chosen = ready_now[0]
+            media = channel_queues[chosen].pop(0)
+            ok, msg = await _send_one_safe(bot, chosen, media)
+            if ok:
+                success += 1
+                per_channel_sent[chosen] += 1
+            elif 'limit' in msg or 'cooldown' in msg:
+                # Put back at front of queue (race against quota)
+                channel_queues[chosen].insert(0, media)
+                skipped += 1
+                reasons.append(f"chat {chosen}: {msg}")
+                # Drop further items for this channel if it's a hard daily cap
+                if 'daily limit' in msg:
+                    skipped += len(channel_queues[chosen])
+                    channel_queues[chosen] = []
+            else:
+                failed += 1
+                reasons.append(f"chat {chosen}: {msg}")
+
+            completed += 1
+            # Progress ping
+            if progress_chat_id and completed % progress_step == 0:
+                try:
+                    await bot.send_message(
+                        progress_chat_id,
+                        f"⏳ Progress: {completed}/{total_jobs} "
+                        f"(✅ {success} sent · ⏭ {skipped} skipped · ❌ {failed} failed)"
+                    )
+                except Exception:
+                    pass
+
+            # GLOBAL gap before next send (regardless of which channel goes next).
+            # Adds randomness so consecutive cross-channel posts look natural.
+            gap = random.uniform(MIN_GAP_BETWEEN_SENDS_SEC, MAX_GAP_BETWEEN_SENDS_SEC)
+            await asyncio.sleep(gap)
+        else:
+            # No channel is ready right now — sleep until the soonest is ready.
+            # Cap the sleep at 5 minutes to avoid super-long blocks if cooldowns are huge
+            # (ASGI / process management still needs to breathe).
+            wait_seconds = min(300, max(5, soonest_ready_at - now))
+            await asyncio.sleep(wait_seconds)
+
+    save_data()
+    return {
+        'success': success,
+        'skipped': skipped,
+        'failed': failed,
+        'reasons': reasons,
+        'per_channel_sent': per_channel_sent
+    }
+# ─────────────────────────────────────────────────────────────────────────
+
+
+
+async def send_global_to_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Push the global media pool to one channel, multiple channels, or all.
+    Uses the safety orchestrator: jittered intervals, per-channel cooldown,
+    daily quota cap. NEVER sends in tight bursts. Skips channels that have
+    hit their daily limit. Honors Telegram flood-wait responses.
+
+    Usage:
+      /send_global_to CHANNEL_ID
+      /send_global_to all
+      /send_global_to ID1 ID2 ID3
+    """
+    if await ignore_non_admin(update, context):
+        return
+
+    if not GLOBAL_MEDIA_POOL:
+        await update.message.reply_text(
+            "❌ Global pool is empty.\n"
+            "Use /upload_global_media first.")
+        return
+
+    if not context.args:
+        text = "📤 *Send Global Pool to Channel(s)*\n\n"
+        text += "Usage:\n"
+        text += "• `/send_global_to CHANNEL_ID`\n"
+        text += "• `/send_global_to all`\n"
+        text += "• `/send_global_to ID1 ID2 ID3`\n\n"
+        text += f"Pool size: {len(GLOBAL_MEDIA_POOL)} items\n\n"
+        text += f"⚙️ Safety: {MIN_GAP_BETWEEN_SENDS_SEC}-{MAX_GAP_BETWEEN_SENDS_SEC}s gaps · "
+        text += f"{DAILY_LIMIT_PER_CHANNEL}/day per channel\n\n"
+        text += "*Your channels:*\n"
+        for cid, data in MANAGED_CHANNELS.items():
+            today_count = _get_today_counter(cid)
+            text += f"• {data['name']}: `{cid}` ({today_count}/{DAILY_LIMIT_PER_CHANNEL} today)\n"
+        await update.message.reply_text(text, parse_mode='Markdown')
+        return
+
+    # Resolve target channel list
+    target_channels = []
+    if context.args[0].lower() == 'all':
+        target_channels = list(MANAGED_CHANNELS.keys())
+    else:
+        for arg in context.args:
+            try:
+                cid = int(arg)
+                if cid in MANAGED_CHANNELS:
+                    target_channels.append(cid)
+                else:
+                    await update.message.reply_text(f"⚠️ Channel `{cid}` not managed — skipping",
+                                                    parse_mode='Markdown')
+            except ValueError:
+                await update.message.reply_text(f"⚠️ Invalid channel ID: {arg}")
+
+    if not target_channels:
+        await update.message.reply_text("❌ No valid channels to send to")
+        return
+
+    pool_size = len(GLOBAL_MEDIA_POOL)
+    total_jobs = pool_size * len(target_channels)
+    avg_gap = (MIN_GAP_BETWEEN_SENDS_SEC + MAX_GAP_BETWEEN_SENDS_SEC) / 2
+    estimated_min = int((total_jobs * avg_gap) / 60)
+
+    await update.message.reply_text(
+        f"⏳ *Starting safe send...*\n\n"
+        f"Pool: {pool_size} items × {len(target_channels)} channels = {total_jobs} sends\n"
+        f"Gap: {MIN_GAP_BETWEEN_SENDS_SEC}-{MAX_GAP_BETWEEN_SENDS_SEC}s random\n"
+        f"Estimated time: ~{estimated_min} min\n"
+        f"Per-channel cap: {DAILY_LIMIT_PER_CHANNEL}/day\n\n"
+        f"Order will be randomized across channels (not all-at-once).\n"
+        f"You'll get progress pings.",
+        parse_mode='Markdown')
+
+    # Run the safe orchestrator
+    result = await send_pool_to_channels_safely(
+        context.bot,
+        target_channels,
+        progress_chat_id=ADMIN_ID
+    )
+
+    # Final report
+    summary = (
+        f"✅ *Send Complete*\n\n"
+        f"✅ Sent:    {result['success']}\n"
+        f"⏭ Skipped: {result['skipped']}  (daily-limit / cooldown)\n"
+        f"❌ Failed:  {result['failed']}\n"
+        f"Channels: {len(target_channels)}\n"
+    )
+    pcs = result.get('per_channel_sent', {})
+    if pcs:
+        summary += "\n*Per-channel sent:*\n"
+        for cid, n in sorted(pcs.items(), key=lambda x: -x[1]):
+            name = MANAGED_CHANNELS.get(cid, {}).get('name', f'Chat {cid}')
+            cap = _channel_daily_cap(cid)
+            summary += f"• {name}: {n} (today total {_get_today_counter(cid)}/{cap})\n"
+    if result['skipped'] > 0 and result['reasons']:
+        summary += f"\n_First skip reasons:_\n"
+        for r in result['reasons'][:3]:
+            summary += f"  • {r}\n"
+    await update.message.reply_text(summary, parse_mode='Markdown')
+
+
+async def safety_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show today's send counters and current safety limits."""
+    if await ignore_non_admin(update, context):
+        return
+
+    today = _today_key()
+    today_counts = SEND_COUNTERS_BY_DAY.get(today, {})
+    total_today = sum(today_counts.values())
+
+    text = f"🛡️ *Safety Status* — {today} UTC\n\n"
+    text += f"*Today's sends:*\n"
+    text += f"Global: {total_today}/{GLOBAL_DAILY_LIMIT}\n\n"
+    if today_counts:
+        text += f"*Per-channel today:*\n"
+        for cid_str, count in sorted(today_counts.items(), key=lambda x: -x[1]):
+            try:
+                cid = int(cid_str)
+            except ValueError:
+                continue
+            name = MANAGED_CHANNELS.get(cid, {}).get('name', f'Channel {cid_str}')
+            cap = _channel_daily_cap(cid)
+            bar_pct = min(100, int(100 * count / cap)) if cap else 0
+            text += f"• {name}: {count}/{cap}  ({bar_pct}%)\n"
+    else:
+        text += "_No sends today yet._\n"
+
+    # Per-channel pacing summary
+    text += f"\n*Per-channel pacing:*\n"
+    if not MANAGED_CHANNELS:
+        text += "_(no channels)_\n"
+    for cid, data in MANAGED_CHANNELS.items():
+        cap = _channel_daily_cap(cid)
+        cap_label = f"{cap}/day"
+        if cid in CHANNEL_DAILY_LIMITS:
+            cap_label += " ⚙️"
+        if cid in CHANNEL_INTERVALS:
+            ci = CHANNEL_INTERVALS[cid]
+            pace = f"{ci['min']}-{ci['max']}min ⚙️"
+        else:
+            pace = f"{PER_CHANNEL_COOLDOWN_SEC}s default"
+        text += f"• {data['name']}: {cap_label} · {pace}\n"
+
+    text += (
+        f"\n*Global safety:*\n"
+        f"⏱  Gap between sends: {MIN_GAP_BETWEEN_SENDS_SEC}-{MAX_GAP_BETWEEN_SENDS_SEC}s (random)\n"
+        f"❄️  Default per-channel cooldown: {PER_CHANNEL_COOLDOWN_SEC}s\n"
+        f"📊 Default per-channel daily cap: {DAILY_LIMIT_PER_CHANNEL}\n"
+        f"🌐 Global daily cap: {GLOBAL_DAILY_LIMIT}\n\n"
+        f"⚙️ = channel-specific override is active\n\n"
+        f"_Adjust:_\n"
+        f"• `/set_safety_limits MIN MAX COOLDOWN PER_CH GLOBAL`\n"
+        f"• `/set_interval CHANNEL_ID MIN_MIN MAX_MIN` (per-channel pace)\n"
+        f"• `/set_channel_daily CHANNEL_ID LIMIT` (per-channel daily cap)"
+    )
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def set_safety_limits_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Set the 5 safety limits in one go.
+    Usage: /set_safety_limits MIN_GAP MAX_GAP COOLDOWN PER_CH_DAILY GLOBAL_DAILY
+    """
+    global MIN_GAP_BETWEEN_SENDS_SEC, MAX_GAP_BETWEEN_SENDS_SEC
+    global PER_CHANNEL_COOLDOWN_SEC, DAILY_LIMIT_PER_CHANNEL, GLOBAL_DAILY_LIMIT
+
+    if await ignore_non_admin(update, context):
+        return
+
+    if len(context.args) != 5:
+        await update.message.reply_text(
+            "Usage: `/set_safety_limits MIN_GAP MAX_GAP COOLDOWN PER_CH_DAILY GLOBAL_DAILY`\n\n"
+            "All values are in seconds (gap/cooldown) or message counts (daily caps).\n\n"
+            "Recommended profiles:\n"
+            "• Conservative: `15 40 180 30 300`\n"
+            "• Default:      `8 25 90 50 500`\n"
+            "• Aggressive:   `5 15 45 80 800` (NOT recommended)\n",
+            parse_mode='Markdown')
+        return
+
+    try:
+        a, b, cooldown, per_ch, glob = [int(x) for x in context.args]
+        if a < 3 or b < a or cooldown < 30 or per_ch < 1 or glob < per_ch:
+            await update.message.reply_text(
+                "❌ Invalid values. Constraints:\n"
+                "• MIN_GAP ≥ 3 (Telegram-safe)\n"
+                "• MAX_GAP ≥ MIN_GAP\n"
+                "• COOLDOWN ≥ 30\n"
+                "• PER_CH_DAILY ≥ 1\n"
+                "• GLOBAL_DAILY ≥ PER_CH_DAILY")
+            return
+
+        MIN_GAP_BETWEEN_SENDS_SEC  = a
+        MAX_GAP_BETWEEN_SENDS_SEC  = b
+        PER_CHANNEL_COOLDOWN_SEC   = cooldown
+        DAILY_LIMIT_PER_CHANNEL    = per_ch
+        GLOBAL_DAILY_LIMIT         = glob
+        save_data()
+
+        await update.message.reply_text(
+            f"✅ Safety limits updated:\n\n"
+            f"⏱  Gap: {a}-{b}s\n"
+            f"❄️  Cooldown: {cooldown}s\n"
+            f"📊 Per-channel/day: {per_ch}\n"
+            f"🌐 Global/day: {glob}",
+            parse_mode='Markdown')
+    except ValueError:
+        await update.message.reply_text("❌ All 5 arguments must be integers")
+
+
+async def set_channel_daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Override the daily-cap for a specific channel. Use this to give your
+    Premium channel a tighter cap (e.g. 20/day) and your Tripwire channel
+    a looser one (e.g. 80/day), all under the same global ceiling.
+
+    Usage:
+      /set_channel_daily CHANNEL_ID DAILY_LIMIT
+      /set_channel_daily CHANNEL_ID 0      ← reset to global default
+    """
+    global CHANNEL_DAILY_LIMITS
+
+    if await ignore_non_admin(update, context):
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: `/set_channel_daily CHANNEL_ID DAILY_LIMIT`\n\n"
+            f"Current global default: {DAILY_LIMIT_PER_CHANNEL}/day\n\n"
+            "*Existing per-channel overrides:*\n" +
+            (
+                "\n".join(
+                    f"• {MANAGED_CHANNELS.get(cid, {}).get('name', cid)}: {lim}"
+                    for cid, lim in CHANNEL_DAILY_LIMITS.items()
+                ) or "_(none — all channels use the global default)_"
+            ) +
+            "\n\nSet limit to `0` to remove the override.",
+            parse_mode='Markdown')
+        return
+
+    try:
+        channel_id = int(context.args[0])
+        limit = int(context.args[1])
+        if channel_id not in MANAGED_CHANNELS:
+            await update.message.reply_text("❌ Channel not managed")
+            return
+        if limit < 0:
+            await update.message.reply_text("❌ Limit must be ≥ 0 (use 0 to remove override)")
+            return
+
+        if limit == 0:
+            if channel_id in CHANNEL_DAILY_LIMITS:
+                del CHANNEL_DAILY_LIMITS[channel_id]
+            save_data()
+            await update.message.reply_text(
+                f"✅ Override removed for {MANAGED_CHANNELS[channel_id]['name']}\n"
+                f"Now uses global default: {DAILY_LIMIT_PER_CHANNEL}/day")
+        else:
+            CHANNEL_DAILY_LIMITS[channel_id] = limit
+            save_data()
+            await update.message.reply_text(
+                f"✅ Set {MANAGED_CHANNELS[channel_id]['name']} to {limit}/day")
+    except ValueError:
+        await update.message.reply_text("❌ Both arguments must be integers")
 
 
 # ========== LINKS UPLOAD COMMANDS ==========
@@ -2812,6 +3492,18 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode='Markdown')
         return
 
+    # NEW: Global media pool — no channel binding
+    if context.user_data.get('global_upload_mode'):
+        GLOBAL_MEDIA_POOL.append({
+            'type': media_type,
+            'file_id': file_id,
+            'caption': caption
+        })
+        save_data()
+        count = len(GLOBAL_MEDIA_POOL)
+        logger.info(f"✅ {media_type} added to GLOBAL pool. Total: {count}")
+        return
+
     if context.user_data.get('media_upload_mode'):
         channel_id = context.user_data.get('media_upload_channel')
 
@@ -3068,6 +3760,16 @@ def main():
     app.add_handler(CommandHandler("done_media", done_media_command))
     app.add_handler(CommandHandler("list_media", list_media_command))
     app.add_handler(CommandHandler("clear_media", clear_media_command))
+
+    # Global media pool commands (no channel binding)
+    app.add_handler(CommandHandler("upload_global_media", upload_global_media_command))
+    app.add_handler(CommandHandler("done_global_media", done_global_media_command))
+    app.add_handler(CommandHandler("list_global_media", list_global_media_command))
+    app.add_handler(CommandHandler("clear_global_media", clear_global_media_command))
+    app.add_handler(CommandHandler("send_global_to", send_global_to_command))
+    app.add_handler(CommandHandler("safety_status", safety_status_command))
+    app.add_handler(CommandHandler("set_safety_limits", set_safety_limits_command))
+    app.add_handler(CommandHandler("set_channel_daily", set_channel_daily_command))
 
     # Links upload commands
     app.add_handler(CommandHandler("upload_links", upload_links_command))
